@@ -1,12 +1,9 @@
 <div align="center">
 
-```
- ____    _   _      _      _   _   _____    ___    __  __  __  __
-|  _ \  | | | |    / \    | \ | | |_   _|  / _ \  |  \/  | \ \/ /
-| |_) | | |_| |   / _ \   |  \| |   | |   | | | | | |\/| |  \  /
-|  __/  |  _  |  / ___ \  | |\  |   | |   | |_| | | |  | |  /  \
-|_|     |_| |_| /_/   \_\ |_| \_|   |_|    \___/  |_|  |_| /_/\_\
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo-white.png">
+  <img src="docs/logo-black.png" alt="PhantomX - Unseen. Untraced. Undetected." width="520">
+</picture>
 
 **Route your whole computer through Tor. Fail-closed. Leak-tested.**
 
@@ -17,7 +14,7 @@
 
 Created by **[M911x0](https://github.com/m911x0)**
 
-<img src="docs/screenshot.png" alt="PHANTOMX control panel" width="760">
+<img src="docs/demo.gif" alt="PhantomX demo: start protection, Tor connects, every leak test passes" width="760">
 
 </div>
 
@@ -37,6 +34,12 @@ every app ──► sing-box tunnel ──► tor ──► Tor network ──�
      │
      └──✗ every other path blocked by the firewall (fail-closed)
 ```
+
+## Screenshots
+<p align="center">
+  <img src="docs/screenshot.png" alt="PhantomX control panel" width="49%">
+  <img src="docs/about.png" alt="About and lawful-use notice" width="40%">
+</p>
 
 ## Install
 You need **Python 3.10+** and **pipx**.

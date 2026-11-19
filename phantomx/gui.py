@@ -84,6 +84,22 @@ class Link(tk.Label):
         self.bind("<ButtonRelease-1>", lambda e: browser.open_url(url) if isinstance(url, str) else url())
 
 
+def _logo(parent, small: bool = False) -> tk.Label:
+    """The PhantomX wordmark (white, transparent PNG); falls back to the ASCII logo."""
+    try:
+        import base64
+        from importlib import resources
+        name = "assets/logo-white-small.png" if small else "assets/logo-white.png"
+        data = resources.files("phantomx").joinpath(name).read_bytes()
+        img = tk.PhotoImage(data=base64.b64encode(data))
+        label = tk.Label(parent, image=img, bg=parent["bg"], anchor="w")
+        label.image = img  # keep a reference, or Tk drops the image
+        return label
+    except Exception:  # noqa: BLE001 - never let branding break the app
+        return tk.Label(parent, text=LOGO, bg=parent["bg"], fg=TEXT, font=(MONO, 8 if small else 9),
+                        justify="left", anchor="w")
+
+
 def _card(parent, **kw) -> tk.Frame:
     return tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=LINE, **kw)
 
@@ -126,7 +142,7 @@ class App:
         # header
         head = tk.Frame(wrap, bg=BG)
         head.pack(fill="x")
-        tk.Label(head, text=LOGO, bg=BG, fg=TEXT, font=(MONO, 9), justify="left", anchor="w").pack(side="left")
+        _logo(head).pack(side="left", anchor="w")
         meta = tk.Frame(head, bg=BG)
         meta.pack(side="right", anchor="ne")
         tk.Label(meta, text=f"v{__version__}", bg=BG, fg=SUB, font=(MONO, 9), padx=8, pady=2,
@@ -219,7 +235,7 @@ class App:
 
     def _about(self):
         win = self._dialog(f"About {APP}", 640, 560)
-        tk.Label(win, text=LOGO, bg=BG, fg=TEXT, font=(MONO, 8), justify="left", anchor="w").pack(fill="x")
+        _logo(win, small=True).pack(fill="x")
         tk.Label(win, text=f"{APP} v{__version__}", bg=BG, fg=TEXT, font=(FONT, 13, "bold"), anchor="w").pack(fill="x", pady=(12, 0))
         row = tk.Frame(win, bg=BG)
         row.pack(fill="x", pady=(4, 0))

@@ -35,4 +35,4 @@ phantomx = "phantomx.cli:main"
 include = ["phantomx*"]
 
 [tool.setuptools.package-data]
-phantomx = ["keys/*.asc"]
+phantomx = ["keys/*.asc", "assets/*.png"]
