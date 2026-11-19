@@ -285,7 +285,7 @@ class App:
     # ---------- worker plumbing ----------
     def _watch(self):
         """While protected, verify every few seconds that sing-box and tor are still alive."""
-        if not self.busy and self.shown in ("protected", "protected_warn"):
+        if not self.busy and self.shown in ("protected", "protected_warn", "unverified"):
             def work():
                 try:
                     st = self.engine.status()
@@ -349,7 +349,7 @@ class App:
                     self.detail_lbl.configure(text=f"Connecting to the Tor network: {msg[1]}%")
                 elif msg[0] == "watch":
                     st, tail = msg[1], msg[2]
-                    if st.phase != "running" and self.shown in ("protected", "protected_warn"):
+                    if st.phase != "running" and self.shown in ("protected", "protected_warn", "unverified"):
                         self._show_engine_status(st)
                         self._log("WARNING: a tunnel component stopped "
                                   f"(sing-box alive={st.singbox_alive}, tor alive={st.tor_alive}). "
@@ -390,8 +390,12 @@ class App:
     # ---------- views ----------
     def _show_engine_status(self, st: Status):
         if st.phase == "running":
+            # PX07: "running" is not "protected". Only a passing leak test earns PROTECTED.
             self.progress["value"] = st.bootstrap
-            self._show_status("protected")
+            key = {PASS: "protected", WARN: "protected_warn", FAIL: "leak"}.get(st.verified or "", "unverified")
+            self._show_status(key)
+            if key == "unverified":
+                self.root.after(200, lambda: self._run("check", self.engine.run_checks))
         elif st.phase in ("locked", "locking"):
             self._show_status("locked")
         else:
@@ -408,6 +412,8 @@ class App:
                          "The device is locked first; nothing leaves until Tor is ready."),
             "locked": ("LOCKED", (BG, TEXT), "Locked - no internet, no leaks",
                        "Press START PROTECTION to retry, or STOP & RESTORE INTERNET to go back to normal."),
+            "unverified": ("VERIFYING", (RAISED, TEXT), "Tunnel running - verifying...",
+                           "Running a leak test before claiming protection. Do not browse until it passes."),
             "protected": ("PROTECTED", (TEXT, BG), "All device traffic goes through Tor",
                           "For sensitive browsing use Tor Browser only: normal browsers reveal who you are even when your IP is hidden."),
             "protected_warn": ("PROTECTED", (TEXT, BG), "Protected, with warnings",

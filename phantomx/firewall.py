@@ -61,7 +61,7 @@ foreach ($p in @($D.profiles)) {
 }
 $names = @($D.rules | ForEach-Object { [string]$_ })
 if ($names.Count -gt 0) { Enable-NetFirewallRule -PolicyStore PersistentStore -Name $names -ErrorAction SilentlyContinue }
-Remove-NetFirewallRule -PolicyStore PersistentStore -Group 'PhantomX' -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$D.group) -ErrorAction SilentlyContinue
 Emit ([pscustomobject]@{ ok = $true })
 """
 
@@ -69,8 +69,9 @@ PS_STATUS = r"""
 $active = @(Get-NetFirewallProfile -PolicyStore ActiveStore | ForEach-Object {
   [pscustomobject]@{ name = [string]$_.Name; enabled = [string]$_.Enabled; outbound = [string]$_.DefaultOutboundAction } })
 $unmanaged = @(Get-NetFirewallRule -PolicyStore ActiveStore -Direction Outbound -Action Allow -Enabled True -ErrorAction SilentlyContinue |
-  Where-Object { $_.Group -ne 'PhantomX' } | ForEach-Object { [string]$_.DisplayName })
-$ours = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group 'PhantomX' -ErrorAction SilentlyContinue).Count
+  Where-Object { $_.Group -ne 'PhantomX' } | ForEach-Object {
+    [pscustomobject]@{ name = [string]$_.DisplayName; source = [string]$_.PolicyStoreSourceType } })
+$ours = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$D.group) -ErrorAction SilentlyContinue).Count
 Emit ([pscustomobject]@{ active = $active; unmanaged = $unmanaged; ours = $ours })
 """
 
@@ -82,8 +83,9 @@ DEFAULT_PROFILES =[{"name": n, "outbound": "NotConfigured"} for n in ("Domain", 
 
 
 class Firewall:
-    def __init__(self, runner: PowerShellRunner | None = None):
+    def __init__(self, runner: PowerShellRunner | None = None, group: str = GROUP):
         self.runner = runner or PowerShellRunner()
+        self.group = group  # rule group to restore/count ("OnionShield" for pre-rename sessions)
 
     def snapshot(self) -> dict:
         r = self.runner.run(PS_SNAPSHOT, {})
@@ -107,11 +109,17 @@ class Firewall:
         if not snapshot or not snapshot.get("profiles"):
             # Emergency path (snapshot lost): return to Windows defaults and drop our rules.
             snapshot = {"profiles": DEFAULT_PROFILES, "rules": (snapshot or {}).get("rules", [])}
-        self.runner.run(PS_RESTORE, {"profiles": snapshot["profiles"], "rules": snapshot.get("rules", [])})
+        self.runner.run(PS_RESTORE, {"profiles": snapshot["profiles"], "rules": snapshot.get("rules", []),
+                                     "group": self.group})
 
     def status(self) -> dict:
-        r = self.runner.run(PS_STATUS, {})
-        return {"active": list(r.get("active") or []), "unmanaged": list(r.get("unmanaged") or []),
+        """`unmanaged`: names of allow rules we cannot disable; `unmanaged_gpo`: the subset that
+        comes from Group Policy (PX03: those can override the lock and FAIL the leak test)."""
+        r = self.runner.run(PS_STATUS, {"group": self.group})
+        raw = list(r.get("unmanaged") or [])
+        names = [u["name"] if isinstance(u, dict) else str(u) for u in raw]
+        gpo = [u["name"] for u in raw if isinstance(u, dict) and u.get("source") == "GroupPolicy"]
+        return {"active": list(r.get("active") or []), "unmanaged": names, "unmanaged_gpo": gpo,
                 "ours": int(r.get("ours") or 0)}
 
 

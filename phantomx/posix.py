@@ -162,8 +162,24 @@ class PosixOps:
 
 
 # ---------------------------------------------------------------- Linux firewall
+def check_gid_free(gid: int = PHANTOMX_GID) -> None:
+    """The firewall trusts this gid; refuse if a real group already uses it (PX09)."""
+    try:
+        import grp
+        existing = grp.getgrgid(gid)
+    except (ImportError, KeyError):
+        return
+    raise PosixError(f"group id {gid} is already used by group '{existing.gr_name}'. "
+                     "PhantomX trusts that gid in its firewall rules, so it refuses to run.")
+
+
 def nft_ruleset(tun_name: str, gid: int = PHANTOMX_GID) -> str:
-    return f"""table inet {NFT_TABLE} {{
+    """One atomic nft transaction (PX01): `nft -f` applies the whole file or nothing.
+    The leading `table` + `delete table` replace any previous version without a gap.
+    FORWARD is covered too (PX04): containers/VMs may only go out through the tunnel."""
+    return f"""table inet {NFT_TABLE}
+delete table inet {NFT_TABLE}
+table inet {NFT_TABLE} {{
   chain output {{
     type filter hook output priority 0; policy drop;
     oifname "lo" accept
@@ -171,8 +187,19 @@ def nft_ruleset(tun_name: str, gid: int = PHANTOMX_GID) -> str:
     oifname "{tun_name}" accept
     udp sport 68 udp dport 67 accept
   }}
+  chain forward {{
+    type filter hook forward priority 0; policy drop;
+    oifname "{tun_name}" accept
+    iifname "{tun_name}" accept
+  }}
 }}
 """
+
+
+def nft_enforcing(listing: str, tun_name: str, gid: int = PHANTOMX_GID) -> bool:
+    """Independent check of what the kernel actually holds (`nft list table`)."""
+    return (listing.count("policy drop") >= 2 and "hook output" in listing and "hook forward" in listing
+            and f"skgid {gid}" in listing and f'"{tun_name}"' in listing)
 
 
 class LinuxFirewall:
@@ -182,23 +209,30 @@ class LinuxFirewall:
     def snapshot(self) -> dict:
         return {"profiles": [], "rules": []}
 
+    def _listing(self) -> str | None:
+        proc = subprocess.run(["nft", "list", "table", "inet", NFT_TABLE], capture_output=True, text=True)
+        return proc.stdout if proc.returncode == 0 else None
+
     def lockdown(self, disable_rules, allow_programs) -> None:
         if not shutil.which("nft"):
             raise PosixError("nftables (`nft`) is required. Install it (e.g. `sudo apt install nftables`).")
-        _run(["nft", "delete", "table", "inet", NFT_TABLE], check=False)
+        check_gid_free()
         _run(["nft", "-f", "-"], input=nft_ruleset(self.tun_name))
+        listing = self._listing()
+        if not listing or not nft_enforcing(listing, self.tun_name):
+            raise PosixError("nftables lock could not be verified in the kernel ruleset")
 
     def allow_tunnel(self, alias: str, address: str = "") -> None:
         pass  # the tunnel interface name is already allowed in the ruleset
 
     def restore(self, snapshot) -> None:
-        _run(["nft", "delete", "table", "inet", NFT_TABLE], check=False)
+        _run(["nft", "delete", "table", "inet", NFT_TABLE], check=False)  # absent table is fine
 
     def status(self) -> dict:
         enabled = bool(shutil.which("nft"))
-        locked = enabled and subprocess.run(["nft", "list", "table", "inet", NFT_TABLE],
-                                            capture_output=True).returncode == 0
-        return {"enabled": enabled, "locked": locked, "unmanaged": [], "active": []}
+        listing = self._listing() if enabled else None
+        return {"enabled": enabled, "locked": bool(listing) and nft_enforcing(listing, self.tun_name),
+                "ours": 1 if listing else 0, "unmanaged": [], "active": []}
 
 
 # ---------------------------------------------------------------- macOS firewall
@@ -227,6 +261,7 @@ class MacFirewall:
         _run(["pfctl", "-a", PF_ANCHOR, "-f", "-"], input=pf_rules(iface))
 
     def lockdown(self, disable_rules, allow_programs) -> None:
+        check_gid_free()
         self._load(None)
         if not self.token_path.exists():
             out = _run(["pfctl", "-E"], check=False)
@@ -234,6 +269,9 @@ class MacFirewall:
             if not m:
                 raise PosixError(f"could not enable pf: {out.strip()}")
             self.token_path.write_text(m.group(1))
+        if not self.status()["locked"]:
+            raise PosixError("pf lock could not be verified (pf disabled, or the anchor is not evaluated "
+                             "by the main ruleset in /etc/pf.conf)")
 
     def allow_tunnel(self, alias: str, address: str = "") -> None:
         iface = self.ops.tun_interface(alias, address or self.tun_address)
@@ -248,11 +286,23 @@ class MacFirewall:
             self.token_path.unlink(missing_ok=True)
 
     def status(self) -> dict:
-        info = _run(["pfctl", "-s", "info"], check=False)
-        enabled = "Status: Enabled" in info
-        rules = _run(["pfctl", "-a", PF_ANCHOR, "-s", "rules"], check=False)
-        locked = enabled and "block drop out quick all" in rules
-        return {"enabled": True, "locked": locked, "unmanaged": [], "active": []}
+        """PX05: report what pf really enforces.
+        enabled = pf can be used here (pfctl present; lockdown turns pf on itself).
+        locked  = pf is running AND our anchor holds the block rule AND the main ruleset
+                  actually evaluates `com.apple/*` anchors."""
+        return pf_status(_run(["pfctl", "-s", "info"], check=False),
+                         _run(["pfctl", "-s", "rules"], check=False),
+                         _run(["pfctl", "-a", PF_ANCHOR, "-s", "rules"], check=False),
+                         bool(shutil.which("pfctl")))
+
+
+def pf_status(info: str, main_rules: str, anchor_rules: str, available: bool = True) -> dict:
+    running = "Status: Enabled" in info
+    anchored = bool(re.search(r'anchor "com\.apple/\*"', main_rules))
+    has_block = "block drop out quick all" in anchor_rules
+    return {"enabled": available, "running": running,
+            "locked": running and anchored and has_block,
+            "ours": 1 if anchor_rules.strip() else 0, "unmanaged": [], "active": []}
 
 
 # ---------------------------------------------------------------- elevation

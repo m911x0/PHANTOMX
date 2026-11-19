@@ -7,6 +7,7 @@
 
 **Route your whole computer through Tor. Fail-closed. Leak-tested.**
 
+![Status: Beta](https://img.shields.io/badge/status-beta-white.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-black.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-black.svg)
@@ -19,6 +20,11 @@ Created by **[M911x0](https://github.com/m911x0)**
 </div>
 
 ---
+
+> **Beta.** PhantomX is under active security review. Windows has been tested end-to-end on real
+> hardware; macOS and Linux pass automated tests but still need real-hardware validation. Do not
+> rely on it where your safety depends on anonymity: use Tails or Whonix. See
+> [SECURITY.md](SECURITY.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Why PHANTOMX
 Most "torify everything" scripts are Linux-only, and they quietly leak when Tor stops. PHANTOMX is different:

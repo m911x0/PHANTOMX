@@ -60,7 +60,8 @@ def load_manifest(path: Path) -> dict[str, str] | None:
 
 def safe_extract_tar(archive: Path, dest: Path) -> None:
     if not hasattr(tarfile, "data_filter"):
-        raise IntegrityError("this Python lacks safe tar extraction; use Python 3.12+")
+        raise IntegrityError("this Python lacks safe tar extraction (tarfile data filter). "
+                             "Use Python 3.10.12+, 3.11.4+ or 3.12+.")
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r:*") as tar:
         tar.extractall(dest, filter="data")

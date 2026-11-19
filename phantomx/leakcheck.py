@@ -17,7 +17,9 @@ from dataclasses import dataclass
 
 from .config import Settings
 from .firewall import firewall_locked
-from .osinfo import LINUX, MACOS, current_os
+from .osinfo import LINUX, MACOS, WINDOWS, current_os
+
+IP_UNICAST_IF = 31
 
 CHECK_URL = "https://check.torproject.org/api/ip"
 PASS, WARN, FAIL = "pass", "warn", "fail"
@@ -55,11 +57,14 @@ class SystemProbe:
             return json.loads(resp.read(4096).decode("utf-8"))
 
     def _pin_to_physical(self, s: socket.socket, bind_ip: str) -> None:
-        """Force the socket out of the physical NIC, bypassing the tunnel's routes.
-        Windows' strong-host model does that when the source IP is bound; Linux and macOS
-        use a weak-host model, so the socket is pinned to the interface itself."""
+        """Force the socket out of the physical NIC, bypassing the tunnel's routes, so the test
+        is a REAL bypass attempt (PX02): the socket is explicitly pinned to the interface on
+        every OS, and also bound to its source address."""
         os_name = current_os()
-        if os_name == LINUX and self._iface:
+        if os_name == WINDOWS and self._iface is not None:
+            # IP_UNICAST_IF (31): interface index, network byte order, for IPv4 sockets.
+            s.setsockopt(socket.IPPROTO_IP, IP_UNICAST_IF, socket.htonl(int(self._iface)))
+        elif os_name == LINUX and self._iface:
             s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_BINDTODEVICE", 25), self._iface.encode() + b"\x00")
         elif os_name == MACOS and self._iface:
             s.setsockopt(socket.IPPROTO_IP, 25, socket.if_nametoindex(self._iface))  # IP_BOUND_IF
@@ -107,13 +112,20 @@ def run_checks(probe, settings: Settings, sleep=time.sleep) -> list[CheckResult]
         locked = firewall_locked(fw)
         results.append(CheckResult("firewall", "Firewall lock (no direct outbound)",
                                    PASS if locked else FAIL,
-                                   "" if locked else "default outbound policy is not Block"))
-        extra = fw["unmanaged"]
-        results.append(CheckResult(
-            "rules", "Unmanaged outbound allow rules",
-            WARN if extra else PASS,
-            (f"{len(extra)} rule(s) from Group Policy or another store could allow direct traffic if the tunnel stops: "
-             + ", ".join(extra[:5])) if extra else ""))
+                                   "" if locked else "the firewall does not report the lock as enforced"))
+        gpo = list(fw.get("unmanaged_gpo") or [])
+        extra = [n for n in fw.get("unmanaged") or [] if n not in gpo]
+        if gpo:
+            # PX03: a policy-managed allow rule can override the local lock, so protection
+            # cannot be claimed on such a machine.
+            results.append(CheckResult(
+                "rules", "Outbound allow rules enforced by Group Policy", FAIL,
+                f"{len(gpo)} policy rule(s) PhantomX cannot disable may allow direct traffic: " + ", ".join(gpo[:5])))
+        else:
+            results.append(CheckResult(
+                "rules", "Unmanaged outbound allow rules", WARN if extra else PASS,
+                (f"{len(extra)} system/service rule(s) PhantomX cannot disable; they only matter if the tunnel "
+                 "stops: " + ", ".join(extra[:5])) if extra else ""))
     except Exception as exc:  # noqa: BLE001 - report, never crash the check run
         results.append(CheckResult("firewall", "Firewall lock (no direct outbound)", FAIL, str(exc)))
 

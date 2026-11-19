@@ -22,7 +22,7 @@ from . import controlport
 from .config import Settings, SettingsError, load_settings, normalize_app_path
 from .firewall import firewall_enabled, firewall_locked
 from .integrity import load_manifest, sha256_file, verify_manifest
-from .leakcheck import CheckResult, SystemProbe, run_checks
+from .leakcheck import CheckResult, SystemProbe, run_checks, verdict
 from .paths import Layout, tor_browser_tor_dir
 from .singbox import SingBoxService, build_config
 from .state import StateStore
@@ -45,6 +45,7 @@ class Status:
     tor_alive: bool = False
     bootstrap: int = 0
     firewall_locked: bool = False
+    verified: str | None = None    # verdict of the last leak test in this session (pass/warn/fail)
     notes: list[str] = field(default_factory=list)
 
 
@@ -158,10 +159,16 @@ class Engine:
         torrc = build_torrc(settings, self.layout)
         pt_domains = bridge_domains(bridge_lines(settings)) if settings.use_bridges else []
         self.preflight()
+        self._stop_legacy()
         sb_config = build_config(settings, self.layout, self._direct_paths(settings), pt_domains)
 
         state = self.state.load()
         if not state or not state.get("snapshot"):
+            if self._actually_locked():
+                # A previous session's journal is gone but its lock is still in place: a snapshot
+                # taken now would record the LOCKED state as "original" (PX08).
+                raise StartError("The firewall is already locked by a previous session whose saved state "
+                                 "is missing or damaged. Run 'stop' first (it restores safe defaults).")
             state = {"version": 1, "phase": "locking", "snapshot": self.fw.snapshot(), "pids": {}}
             self.state.save(state)
             self.log("Saved the original firewall settings.")
@@ -169,16 +176,19 @@ class Engine:
             self.log("Found a previous locked session; reusing its original firewall snapshot.")
             self._stop_processes(state)
             state["pids"] = {}
+        state["last_check"] = None
 
         try:
             self.fw.lockdown(state["snapshot"]["rules"], [str(self.layout.singbox_exe)])
+            if not self._actually_locked():  # independent check, never trust the apply step alone
+                raise StartError("the firewall does not report the lock as enforced")
         except Exception as exc:
             state["phase"] = "locked"
             self.state.save(state)
-            raise StartError(f"Firewall lock incomplete: {exc}{STILL_LOCKED}") from exc
+            raise StartError(f"Firewall lock failed: {exc}{self._lock_message()}") from exc
         state["phase"] = "locked"
         self.state.save(state)
-        self.log("Lock enabled: nothing can leave this device except through the tunnel.")
+        self.log("Lock enabled and verified: nothing can leave this device except through the tunnel.")
 
         try:
             self.sb.prepare(sb_config)
@@ -205,24 +215,77 @@ class Engine:
             state["pids"] = {}
             state["phase"] = "locked"
             self.state.save(state)
-            raise StartError(f"{exc}{STILL_LOCKED}") from exc
+            raise StartError(f"{exc}{self._lock_message()}") from exc
 
         return self.run_checks(settings)
 
+    def _actually_locked(self) -> bool:
+        try:
+            return firewall_locked(self.fw.status())
+        except Exception:  # noqa: BLE001 - unknown means NOT verified
+            return False
+
+    def _lock_message(self) -> str:
+        """Say what is TRUE right now, checked against the firewall, never assumed (PX01)."""
+        if self._actually_locked():
+            return STILL_LOCKED
+        return ("\n\nWARNING: the firewall lock could NOT be confirmed, so your connection may NOT be protected. "
+                "Do not browse. Run 'stop' to return to a known state, then try again.")
+
+    def _stop_legacy(self) -> None:
+        """Windows: stop a session left by the pre-rename build ("OnionShield") and restore the
+        firewall from ITS journal; otherwise its lock/tunnel would outlive the old package."""
+        if self.layout.os != "windows" or self.layout.root.name != "PhantomX":
+            return
+        legacy_root = self.layout.root.parent / "OnionShield"
+        journal = StateStore(legacy_root / "state.json")
+        if not journal.path.exists():
+            return
+        legacy = journal.load() or {}
+        old = Layout(legacy_root, self.layout.os)
+        for key, path in (("singbox", old.singbox_exe), ("tor", old.tor_exe)):
+            pid = (legacy.get("pids") or {}).get(key)
+            if pid:
+                try:
+                    self.ops.kill(pid, path)
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"Could not stop legacy {key}: {exc}")
+        from .firewall import Firewall
+        Firewall(self.ops.runner, group="OnionShield").restore(legacy.get("snapshot"))
+        journal.clear()
+        self.log("Stopped a leftover OnionShield session (pre-rename) and restored its firewall settings.")
+
     def stop(self) -> None:
+        self._stop_legacy()
         state = self.state.load() or {}
+        if state.get("_corrupt"):
+            self.log("The saved session state was damaged; restoring safe firewall defaults instead.")
         self._stop_processes(state)
         self.fw.restore(state.get("snapshot"))
+        # PX08: prove the restore worked before forgetting how to undo the lock.
+        try:
+            leftover = int(self.fw.status().get("ours") or 0)
+        except Exception as exc:  # noqa: BLE001
+            raise StartError(f"Could not verify that the firewall was restored: {exc}. "
+                             "Your saved state was kept; run 'stop' again.") from exc
+        if leftover:
+            raise StartError(f"{leftover} PhantomX firewall rule(s) are still present after restore. "
+                             "Your saved state was kept; run 'stop' again (as Administrator/root).")
         try:
             self.ops.flush_dns()
         except Exception:  # noqa: BLE001
             pass
         self.state.clear()
-        self.log("Protection stopped; original firewall settings restored.")
+        self.log("Protection stopped; original firewall settings restored and verified.")
 
     def run_checks(self, settings: Settings | None = None) -> list[CheckResult]:
         settings = settings or self.settings()
-        return run_checks(self.probe_factory(settings), settings)
+        results = run_checks(self.probe_factory(settings), settings)
+        state = self.state.load()
+        if state and state.get("phase") == "running":  # PX07: remember the verification
+            state["last_check"] = {"verdict": verdict(results), "at": time.time()}
+            self.state.save(state)
+        return results
 
     def new_identity(self) -> None:
         controlport.new_identity(self.layout.cookie, self.settings().control_port)
@@ -244,4 +307,6 @@ class Engine:
         if st.phase == "running" and not (st.singbox_alive and st.tor_alive):
             st.phase = "locked"
             st.notes.append("A tunnel component stopped; the device is locked with no internet.")
+        if st.phase == "running":
+            st.verified = (state.get("last_check") or {}).get("verdict")
         return st

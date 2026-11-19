@@ -151,12 +151,17 @@ Emit ([pscustomobject]@{ ok = $true })
 """
 
 PS_PHYSICAL_IP = r"""
-$c = Get-NetIPConfiguration | Where-Object {
-  $_.IPv4DefaultGateway -and $_.InterfaceAlias -ne [string]$D.tun -and $_.NetAdapter.Status -eq 'Up'
-} | Select-Object -First 1
+$cands = @(Get-NetIPConfiguration | Where-Object {
+  $_.IPv4DefaultGateway -and $_.InterfaceAlias -ne [string]$D.tun -and $_.NetAdapter.Status -eq 'Up' -and
+  [string](($_.IPv4Address | Select-Object -First 1).IPAddress) -ne [string]$D.tun_ip
+})
+# A real NIC, never a virtual tunnel adapter (wintun/VPN) when a hardware one exists.
+$c = $cands | Where-Object { $_.NetAdapter.HardwareInterface } | Select-Object -First 1
+if (-not $c) { $c = $cands | Select-Object -First 1 }
 $ip = $null
-if ($c) { $ip = [string](($c.IPv4Address | Select-Object -First 1).IPAddress) }
-Emit ([pscustomobject]@{ ip = $ip })
+$idx = $null
+if ($c) { $ip = [string](($c.IPv4Address | Select-Object -First 1).IPAddress); $idx = [int]$c.InterfaceIndex }
+Emit ([pscustomobject]@{ ip = $ip; index = $idx })
 """
 
 PS_AUTHENTICODE = r"""
@@ -200,14 +205,16 @@ class SystemOps:
     def adapter_up(self, name: str, address: str = "") -> bool:
         return bool(self.runner.run(PS_ADAPTER_UP, {"name": name})["up"])
 
-    def physical(self, tun_name: str) -> tuple[str | None, str | None]:
-        return self.physical_ipv4(tun_name), None  # Windows strong-host model: binding the IP is enough
+    def physical(self, tun_name: str, tun_ip: str = "172.19.0.1") -> tuple[str | None, int | None]:
+        """(ipv4, interface index) of the real adapter; the index pins test sockets to it."""
+        r = self.runner.run(PS_PHYSICAL_IP, {"tun": tun_name, "tun_ip": tun_ip.split("/")[0]})
+        return r.get("ip"), r.get("index")
 
     def flush_dns(self) -> None:
         self.runner.run(PS_FLUSH_DNS, {})
 
     def physical_ipv4(self, tun_name: str) -> str | None:
-        return self.runner.run(PS_PHYSICAL_IP, {"tun": tun_name})["ip"]
+        return self.physical(tun_name)[0]
 
     def authenticode(self, path: Path | str) -> tuple[str, str]:
         r = self.runner.run(PS_AUTHENTICODE, {"path": str(path)})

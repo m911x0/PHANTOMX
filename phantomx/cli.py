@@ -151,7 +151,10 @@ def _main(argv: list[str] | None) -> int:
         if cmd == "status":
             st = engine.status()
             print(f"phase={st.phase or 'off'} firewall_locked={st.firewall_locked} "
-                  f"sing-box={st.singbox_alive} tor={st.tor_alive} bootstrap={st.bootstrap}%")
+                  f"sing-box={st.singbox_alive} tor={st.tor_alive} bootstrap={st.bootstrap}% "
+                  f"last_leak_test={st.verified or 'none'}")
+            if st.phase == "running" and st.verified not in ("pass", "warn"):
+                print("NOT VERIFIED: run `phantomx check` before trusting this session.")
             for n in st.notes:
                 print(n)
             return 0
