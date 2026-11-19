@@ -1,0 +1,5 @@
+* text=auto
+# Signed upstream data: must stay byte-for-byte identical or the signature test fails.
+tests/data/** -text
+*.asc -text
+*.png binary

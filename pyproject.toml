@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phantomx"
+version = "0.4.0"
+description = "PHANTOMX: route the whole device through Tor with a fail-closed firewall lock and real leak tests (Windows, macOS, Linux)"
+requires-python = ">=3.10"
+dependencies = []
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "M911x0", url = "https://github.com/m911x0"}]
+keywords = ["tor", "privacy", "anonymity", "kill-switch", "leak-test", "sing-box", "firewall"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Internet :: Proxy Servers",
+]
+
+[project.urls]
+Homepage = "https://github.com/m911x0/PHANTOMX"
+Repository = "https://github.com/m911x0/PHANTOMX"
+Issues = "https://github.com/m911x0/PHANTOMX/issues"
+Author = "https://github.com/m911x0"
+
+[project.scripts]
+phantomx = "phantomx.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["phantomx*"]
+
+[tool.setuptools.package-data]
+phantomx = ["keys/*.asc"]
