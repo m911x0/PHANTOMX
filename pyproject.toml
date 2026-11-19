@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = []
 readme = "README.md"
 license = {text = "MIT"}
-authors = [{name = "M911x0", url = "https://github.com/m911x0"}]
+authors = [{name = "M911x0"}]
 keywords = ["tor", "privacy", "anonymity", "kill-switch", "leak-test", "sing-box", "firewall"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
