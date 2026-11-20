@@ -28,8 +28,10 @@ from .singbox import SingBoxService, build_config
 from .state import StateStore
 from .torconf import TorService, bridge_domains, bridge_lines, build_torrc
 from .system import make_firewall, make_ops
+from .winutil import child_state, describe_exit
 
 TB_PT_NAMES = ("lyrebird", "snowflake-client", "conjure-client")
+VERIFY_MAX_AGE = 30 * 60  # a leak-test result older than this no longer backs "PROTECTED"
 STILL_LOCKED = ("\n\nThe internet is still LOCKED (nothing is leaking). "
                 "Run 'stop' (or press 'Stop & restore internet') to get your normal connection back.")
 
@@ -40,7 +42,7 @@ class StartError(RuntimeError):
 
 @dataclass
 class Status:
-    phase: str | None              # None (off) | "locking" | "locked" | "running"
+    phase: str | None              # None (off) | "locking" | "locked" | "running" | "unsafe"
     singbox_alive: bool = False
     tor_alive: bool = False
     bootstrap: int = 0
@@ -140,14 +142,20 @@ class Engine:
                 except Exception as exc:  # noqa: BLE001
                     self.log(f"Could not stop {key}: {exc}")
 
+    def _alive(self, pid: int, path) -> bool:
+        """Exact for processes we spawned (Popen.poll); OS lookup otherwise (e.g. GUI reopened)."""
+        tracked, alive, _ = child_state(pid)
+        return alive if tracked else self.ops.alive(pid, path)
+
     def _wait_adapter(self, settings: Settings, sb_pid: int, timeout: float = 30) -> None:
         waited = 0.0
         while waited < timeout:
             if self.ops.adapter_up(settings.tun_name, settings.tun_address):
                 return
-            if not self.ops.alive(sb_pid, self.layout.singbox_exe):
+            if not self._alive(sb_pid, self.layout.singbox_exe):
                 self.sleep(0.5)  # let the console log flush
-                raise StartError("sing-box exited before the tunnel interface came up:\n" + self.sb.log_tail())
+                raise StartError(f"sing-box exited before the tunnel interface came up "
+                                 f"({describe_exit(child_state(sb_pid)[2])}):\n" + self.sb.log_tail())
             self.sleep(1)
             waited += 1
         raise StartError("The tunnel interface did not come up in time:\n" + self.sb.log_tail())
@@ -183,7 +191,7 @@ class Engine:
             if not self._actually_locked():  # independent check, never trust the apply step alone
                 raise StartError("the firewall does not report the lock as enforced")
         except Exception as exc:
-            state["phase"] = "locked"
+            state["phase"] = self._failed_phase()
             self.state.save(state)
             raise StartError(f"Firewall lock failed: {exc}{self._lock_message()}") from exc
         state["phase"] = "locked"
@@ -206,14 +214,14 @@ class Engine:
             state["pids"]["tor"] = tor_pid
             self.state.save(state)
             self.tor.wait_bootstrap(settings.bootstrap_timeout,
-                                    lambda: self.ops.alive(tor_pid, self.layout.tor_exe), on_progress)
+                                    lambda: self._alive(tor_pid, self.layout.tor_exe), on_progress)
             state["phase"] = "running"
             self.state.save(state)
             self.log("Connected to the Tor network.")
         except Exception as exc:
             self._stop_processes(state)
             state["pids"] = {}
-            state["phase"] = "locked"
+            state["phase"] = self._failed_phase()
             self.state.save(state)
             raise StartError(f"{exc}{self._lock_message()}") from exc
 
@@ -224,6 +232,10 @@ class Engine:
             return firewall_locked(self.fw.status())
         except Exception:  # noqa: BLE001 - unknown means NOT verified
             return False
+
+    def _failed_phase(self) -> str:
+        """F01: 'locked' is a promise ("no internet, no leaks"); only make it when verified."""
+        return "locked" if self._actually_locked() else "unsafe"
 
     def _lock_message(self) -> str:
         """Say what is TRUE right now, checked against the firewall, never assumed (PX01)."""
@@ -261,7 +273,11 @@ class Engine:
         if state.get("_corrupt"):
             self.log("The saved session state was damaged; restoring safe firewall defaults instead.")
         self._stop_processes(state)
-        self.fw.restore(state.get("snapshot"))
+        try:
+            self.fw.restore(state.get("snapshot"))  # verifies itself against the snapshot (F03)
+        except Exception as exc:
+            raise StartError(f"{exc}\nYour saved state was kept, so nothing is lost: run 'stop' again "
+                             "(as Administrator/root).") from exc
         # PX08: prove the restore worked before forgetting how to undo the lock.
         try:
             leftover = int(self.fw.status().get("ours") or 0)
@@ -296,17 +312,25 @@ class Engine:
         st = Status(phase=state.get("phase"))
         pids = state.get("pids") or {}
         if pids.get("singbox"):
-            st.singbox_alive = self.ops.alive(pids["singbox"], self.layout.singbox_exe)
+            st.singbox_alive = self._alive(pids["singbox"], self.layout.singbox_exe)
         if pids.get("tor"):
-            st.tor_alive = self.ops.alive(pids["tor"], self.layout.tor_exe)
+            st.tor_alive = self._alive(pids["tor"], self.layout.tor_exe)
             st.bootstrap = self.tor.read_progress()[0] if st.tor_alive else 0
         try:
             st.firewall_locked = firewall_locked(self.fw.status())
         except Exception as exc:  # noqa: BLE001
-            st.notes.append(str(exc))
+            st.notes.append(f"firewall state unknown: {exc}")
+        if st.phase and not st.firewall_locked:
+            # F01 / watchdog: whatever the journal says, without a verified lock nothing is promised.
+            st.phase = "unsafe"
+            st.notes.append("The firewall lock is NOT in place: your connection may be exposed. "
+                            "Run 'stop' then 'start'.")
+            return st
         if st.phase == "running" and not (st.singbox_alive and st.tor_alive):
             st.phase = "locked"
             st.notes.append("A tunnel component stopped; the device is locked with no internet.")
         if st.phase == "running":
-            st.verified = (state.get("last_check") or {}).get("verdict")
+            check = state.get("last_check") or {}
+            fresh = time.time() - float(check.get("at") or 0) < VERIFY_MAX_AGE
+            st.verified = check.get("verdict") if fresh else None
         return st

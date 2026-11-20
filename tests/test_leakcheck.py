@@ -1,7 +1,7 @@
 import unittest
 
 from phantomx.config import Settings
-from phantomx.leakcheck import FAIL, PASS, WARN, run_checks, verdict
+from phantomx.leakcheck import FAIL, INCONCLUSIVE, PASS, WARN, run_checks, verdict
 
 LOCKED = {"active": [{"name": n, "enabled": "True", "outbound": "Block"} for n in ("Domain", "Private", "Public")],
           "unmanaged": [], "ours": 4}
@@ -69,7 +69,7 @@ class TestLeakChecks(unittest.TestCase):
             calls.append(1)
             raise OSError("timed out")
         p.tor_check = boom
-        self.assertEqual(by_key(run_checks(p, Settings(), sleep=lambda s: None))["tor"], FAIL)
+        self.assertEqual(by_key(run_checks(p, Settings(), sleep=lambda s: None))["tor"], INCONCLUSIVE)
         self.assertEqual(len(calls), 4)
 
     def test_tor_check_recovers_after_transient_eof(self):
@@ -91,11 +91,12 @@ class TestLeakChecks(unittest.TestCase):
         k = by_key(run_checks(p, Settings()))
         self.assertEqual((k["firewall"], k["rules"]), (FAIL, WARN))
 
-    def test_no_physical_interface_is_warning(self):
+    def test_no_physical_interface_is_inconclusive(self):
         p = GoodProbe()
         p.physical_ipv4 = lambda: None
         r = run_checks(p, Settings())
-        self.assertEqual(by_key(r)["bypass"], WARN)
+        self.assertEqual(by_key(r)["bypass"], INCONCLUSIVE)
+        self.assertEqual(verdict(r), INCONCLUSIVE)
         self.assertNotIn("udp", by_key(r))
 
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2 (2026-11-20): security correctness (re-audit of 0.4.1)
+- **FINDING-01 (critical):** a failed or unverified lock is never recorded or shown as LOCKED. The new **UNSAFE** state ("lock NOT confirmed, you may be exposed") is used whenever the firewall does not confirm enforcement. `status` re-checks the real firewall every time, whatever the journal says.
+- **FINDING-02:** leak probes have three outcomes: **BLOCKED / LEAKED / TEST_ERROR**. Socket setup failures are TEST_ERROR and are never counted as a pass. A remote answer (connection refused/reset) is treated as a **leak**, because packets left the machine.
+- **FINDING-03, Windows:** restore is verified against the saved snapshot: every profile policy and every previously disabled rule. If anything does not match, the journal is kept and `stop` can be retried. Rules deleted since the snapshot are reported but are not a failure.
+- **FINDING-04, Linux:** lock verification is **structural** (`nft -j`). The output and forward base chains must themselves have policy drop, and every accept rule must be one of the expected allowances. Unconditional accepts and jump/goto are rejected. The reviewer's counterexample is a regression test.
+- **FINDING-05:** **INCONCLUSIVE** is separated from accepted exceptions. PROTECTED requires every mandatory check to pass. Only user-accepted exceptions (split tunnel, service-owned rules) may produce "PROTECTED, with your accepted exceptions". Otherwise the result is **NOT VERIFIED**.
+- **Monitoring:** the GUI watchdog re-checks the firewall lock (not just process liveness). Leak-test results expire after 30 minutes and are re-run automatically.
+- **macOS:** processes started by PhantomX are now tracked exactly (no `ps` guessing), and tor's real exit code/signal is reported (e.g. "killed by signal 9 - blocked by code signing"). tor gets `DYLD_LIBRARY_PATH` for its bundled libevent. The executable path comes from `proc_pidpath`.
+- **CI:** new **real-kernel** job: the actual nftables ruleset is applied in an isolated network namespace and verified, including tampered-table detection.
+
 ## 0.4.1 (2026-11-20): security review fixes
 Fixes from an independent static review of 0.4.0 (findings PX01-PX10):
 

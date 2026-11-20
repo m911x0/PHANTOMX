@@ -1,4 +1,5 @@
 """Regression tests for the findings of the 2026-11-20 security review (PX01-PX10)."""
+import json
 import socket
 import sys
 import tempfile
@@ -19,7 +20,30 @@ from phantomx.state import StateStore
 from tests.test_engine import FakeFirewall, FakeOps, FakeProbeFactory, FakeSingBox, FakeTor
 from tests.test_leakcheck import GoodProbe
 
-GOOD_LISTING = nft_ruleset("PhantomX").split("delete table inet phantomx\n", 1)[1]
+def nft_json(out="drop", fwd="drop", extra=()):
+    """What `nft -j list table inet phantomx` returns for our ruleset."""
+    def rule(chain, *matches):
+        exprs = [{"match": {"op": "==", "left": l, "right": r}} for l, r in matches] + [{"accept": None}]
+        return {"rule": {"family": "inet", "table": "phantomx", "chain": chain, "expr": exprs}}
+
+    def meta(k):
+        return {"meta": {"key": k}}
+    items = [
+        {"table": {"family": "inet", "name": "phantomx"}},
+        {"chain": {"name": "output", "type": "filter", "hook": "output", "prio": 0, "policy": out}},
+        {"chain": {"name": "forward", "type": "filter", "hook": "forward", "prio": 0, "policy": fwd}},
+        rule("output", (meta("oifname"), "lo")),
+        rule("output", (meta("skgid"), 64927)),
+        rule("output", (meta("oifname"), "PhantomX")),
+        rule("output", ({"payload": {"protocol": "udp", "field": "sport"}}, 68),
+             ({"payload": {"protocol": "udp", "field": "dport"}}, 67)),
+        rule("forward", (meta("oifname"), "PhantomX")),
+        rule("forward", (meta("iifname"), "PhantomX")),
+    ]
+    return {"nftables": items + list(extra)}
+
+
+GOOD_LISTING = json.dumps(nft_json())
 
 
 class PX01AtomicLinuxLock(unittest.TestCase):
@@ -29,8 +53,9 @@ class PX01AtomicLinuxLock(unittest.TestCase):
 
     def test_enforcing_requires_both_chains(self):
         self.assertTrue(nft_enforcing(GOOD_LISTING, "PhantomX"))
-        self.assertFalse(nft_enforcing(GOOD_LISTING.replace("hook forward", "hook x"), "PhantomX"))
+        self.assertFalse(nft_enforcing(nft_json(fwd="accept"), "PhantomX"))
         self.assertFalse(nft_enforcing("", "PhantomX"))
+        self.assertFalse(nft_enforcing("not json", "PhantomX"))
 
     def _lock(self, listing):
         fw = LinuxFirewall("PhantomX")

@@ -18,7 +18,7 @@ from . import __version__, browser
 from .branding import APP, AUTHOR, AUTHOR_URL, COPYRIGHT, DISCLAIMER, LOGO, REPO_URL
 from .config import save_settings
 from .engine import Engine, Status
-from .leakcheck import FAIL, PASS, WARN, CheckResult, verdict
+from .leakcheck import FAIL, INCONCLUSIVE, PASS, WARN, CheckResult, verdict
 
 # ---- palette: black & white; red only for real danger ----
 BG = "#000000"
@@ -34,6 +34,7 @@ MONO = "Consolas"
 CRASH_LOG = Path(tempfile.gettempdir()) / "phantomx-gui-error.log"
 GUI_LOG = Path(tempfile.gettempdir()) / "phantomx-gui.log"
 WATCH_MS = 15000
+VERDICT_KEY = {PASS: "protected", WARN: "protected_warn", INCONCLUSIVE: "inconclusive", FAIL: "leak"}
 
 
 class FlatButton(tk.Label):
@@ -349,7 +350,15 @@ class App:
                     self.detail_lbl.configure(text=f"Connecting to the Tor network: {msg[1]}%")
                 elif msg[0] == "watch":
                     st, tail = msg[1], msg[2]
-                    if st.phase != "running" and self.shown in ("protected", "protected_warn", "unverified"):
+                    watched = ("protected", "protected_warn", "unverified")
+                    if st.phase == "unsafe" and self.shown in watched:
+                        self._show_engine_status(st)
+                        self._log("WARNING: the firewall lock is no longer in place. Stop and start again.")
+                    elif st.phase == "running" and st.verified is None and self.shown in ("protected", "protected_warn"):
+                        self._log("Last leak test is too old; re-verifying...")
+                        self._show_status("unverified")
+                        self._run("check", self.engine.run_checks)
+                    elif st.phase != "running" and self.shown in watched:
                         self._show_engine_status(st)
                         self._log("WARNING: a tunnel component stopped "
                                   f"(sing-box alive={st.singbox_alive}, tor alive={st.tor_alive}). "
@@ -376,7 +385,7 @@ class App:
             self._show_engine_status(result)
         elif name in ("start", "check"):
             self._render_checks(result)
-            self._show_status({PASS: "protected", WARN: "protected_warn", FAIL: "leak"}[verdict(result)])
+            self._show_status(VERDICT_KEY[verdict(result)])
         elif name == "stop":
             self.progress["value"] = 0
             self._show_status("off")
@@ -392,10 +401,12 @@ class App:
         if st.phase == "running":
             # PX07: "running" is not "protected". Only a passing leak test earns PROTECTED.
             self.progress["value"] = st.bootstrap
-            key = {PASS: "protected", WARN: "protected_warn", FAIL: "leak"}.get(st.verified or "", "unverified")
+            key = VERDICT_KEY.get(st.verified or "", "unverified")
             self._show_status(key)
             if key == "unverified":
                 self.root.after(200, lambda: self._run("check", self.engine.run_checks))
+        elif st.phase == "unsafe":
+            self._show_status("unsafe")
         elif st.phase in ("locked", "locking"):
             self._show_status("locked")
         else:
@@ -416,21 +427,26 @@ class App:
                            "Running a leak test before claiming protection. Do not browse until it passes."),
             "protected": ("PROTECTED", (TEXT, BG), "All device traffic goes through Tor",
                           "For sensitive browsing use Tor Browser only: normal browsers reveal who you are even when your IP is hidden."),
-            "protected_warn": ("PROTECTED", (TEXT, BG), "Protected, with warnings",
-                               "See the leak test results below."),
+            "protected_warn": ("PROTECTED", (TEXT, BG), "Protected, with your accepted exceptions",
+                               "Every mandatory check passed; see the noted exceptions below."),
+            "inconclusive": ("NOT VERIFIED", (RAISED, TEXT), "Protection could not be verified",
+                             "A mandatory check could not run conclusively. Do not rely on this session; "
+                             "run the leak test again."),
             "leak": ("LEAK", (DANGER, TEXT), "Leak test failed - do not browse now",
                      "See the leak test results below."),
+            "unsafe": ("UNSAFE", (DANGER, TEXT), "Firewall lock NOT confirmed - you may be exposed",
+                       "Do not browse. Press STOP & RESTORE INTERNET to return to a known state, then start again."),
         }[key]
         self.shown = key
         self.pill.configure(text=pill, bg=pbg, fg=pfg, highlightthickness=1,
                             highlightbackground=TEXT if key == "locked" else pbg)
-        self.status_lbl.configure(text=headline, fg=DANGER if key == "leak" else TEXT)
+        self.status_lbl.configure(text=headline, fg=DANGER if key in ("leak", "unsafe") else TEXT)
         self.detail_lbl.configure(text=detail)
 
     def _render_checks(self, results: list[CheckResult]):
         for w in self.checks.winfo_children():
             w.destroy()
-        marks = {PASS: ("OK", TEXT), WARN: ("!!", SUB), FAIL: ("XX", DANGER)}
+        marks = {PASS: ("OK", TEXT), WARN: ("--", SUB), INCONCLUSIVE: ("??", TEXT), FAIL: ("XX", DANGER)}
         for r in results:
             mark, color = marks[r.status]
             row = tk.Frame(self.checks, bg=CARD)

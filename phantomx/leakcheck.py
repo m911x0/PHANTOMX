@@ -6,6 +6,7 @@ which is exactly the leak it reports.
 """
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import socket
@@ -22,7 +23,7 @@ from .osinfo import LINUX, MACOS, WINDOWS, current_os
 IP_UNICAST_IF = 31
 
 CHECK_URL = "https://check.torproject.org/api/ip"
-PASS, WARN, FAIL = "pass", "warn", "fail"
+PASS, WARN, INCONCLUSIVE, FAIL = "pass", "warn", "inconclusive", "fail"
 
 
 @dataclass(frozen=True)
@@ -70,34 +71,89 @@ class SystemProbe:
             s.setsockopt(socket.IPPROTO_IP, 25, socket.if_nametoindex(self._iface))  # IP_BOUND_IF
         s.bind((bind_ip, 0))
 
-    def tcp_connect(self, bind_ip: str | None, host: str, port: int, family=socket.AF_INET) -> bool:
-        s = socket.socket(family, socket.SOCK_STREAM)
+    def tcp_connect(self, bind_ip: str | None, host: str, port: int, family=socket.AF_INET) -> Outcome:
+        """A real bypass attempt. Setup failures are TEST_ERROR, never 'blocked' (F02)."""
+        try:
+            s = socket.socket(family, socket.SOCK_STREAM)
+        except OSError as exc:
+            if family == socket.AF_INET6 and _err(exc) in _NO_FAMILY:
+                return Outcome(BLOCKED, "IPv6 is not available on this system")
+            return Outcome(TEST_ERROR, f"could not create socket: {exc}")
         s.settimeout(4)
         try:
-            if bind_ip:
-                self._pin_to_physical(s, bind_ip)
-            s.connect((host, port))
-            return True
-        except OSError:
-            return False
+            try:
+                if bind_ip:
+                    self._pin_to_physical(s, bind_ip)
+            except OSError as exc:
+                return Outcome(TEST_ERROR, f"could not pin the test to the physical adapter: {exc}")
+            try:
+                s.connect((host, port))
+                return Outcome(LEAKED, "direct connection succeeded")
+            except OSError as exc:
+                return classify_send_error(exc)
         finally:
             s.close()
 
-    def udp_dns_probe(self, bind_ip: str, server: str) -> bool:
+    def udp_dns_probe(self, bind_ip: str, server: str) -> Outcome:
         query = struct.pack(">HHHHHH", 0x4f53, 0x0100, 1, 0, 0, 0)
         query += b"".join(bytes([len(p)]) + p.encode() for p in "example.com".split(".")) + b"\x00"
         query += struct.pack(">HH", 1, 1)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(3)
         try:
-            self._pin_to_physical(s, bind_ip)
-            s.sendto(query, (server, 53))
-            s.recvfrom(512)
-            return True
-        except OSError:
-            return False
+            try:
+                self._pin_to_physical(s, bind_ip)
+            except OSError as exc:
+                return Outcome(TEST_ERROR, f"could not pin the test to the physical adapter: {exc}")
+            try:
+                s.sendto(query, (server, 53))
+            except OSError as exc:
+                return classify_send_error(exc)
+            try:
+                s.recvfrom(512)
+                return Outcome(LEAKED, "a direct UDP reply arrived")
+            except OSError as exc:
+                return classify_send_error(exc)
         finally:
             s.close()
+
+
+# ---- probe outcomes (F02): three states, because "the test broke" is not "the firewall blocked"
+BLOCKED, LEAKED, TEST_ERROR = "blocked", "leaked", "test_error"
+
+
+@dataclass(frozen=True)
+class Outcome:
+    state: str
+    detail: str = ""
+
+
+def _err(exc: OSError) -> int | None:
+    return getattr(exc, "winerror", None) or exc.errno
+
+
+_BLOCKED_ERRS = {e for e in (errno.EACCES, errno.EPERM, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                             errno.ENETDOWN, errno.ETIMEDOUT)} | {10013, 10050, 10051, 10060, 10065}
+_REPLY_ERRS = {errno.ECONNREFUSED, errno.ECONNRESET} | {10054, 10061}  # an answer came back: packets left
+_NO_FAMILY = {errno.EAFNOSUPPORT} | {10047}
+
+
+def classify_send_error(exc: OSError) -> Outcome:
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return Outcome(BLOCKED, "no answer (dropped)")
+    code = _err(exc)
+    if code in _REPLY_ERRS:
+        return Outcome(LEAKED, f"a remote host answered ({exc})")
+    if code in _BLOCKED_ERRS:
+        return Outcome(BLOCKED, f"refused locally ({exc.strerror or code})")
+    return Outcome(TEST_ERROR, f"unexpected error: {exc}")
+
+
+def as_outcome(value) -> Outcome:
+    """Accept legacy booleans (True = leaked) from simple probes, e.g. in tests."""
+    if isinstance(value, Outcome):
+        return value
+    return Outcome(LEAKED, "connection succeeded") if value else Outcome(BLOCKED, "blocked")
 
 
 TOR_CHECK_ATTEMPTS = 4
@@ -142,7 +198,7 @@ def run_checks(probe, settings: Settings, sleep=time.sleep) -> list[CheckResult]
         results.append(CheckResult("dns", "DNS stays inside the tunnel", PASS if ok else FAIL,
                                    "" if ok else f"resolved to real addresses: {', '.join(ips)}"))
     except OSError as exc:
-        results.append(CheckResult("dns", "DNS stays inside the tunnel", WARN, f"lookup failed: {exc}"))
+        results.append(CheckResult("dns", "DNS stays inside the tunnel", INCONCLUSIVE, f"lookup failed: {exc}"))
 
     try:
         # Right after "Bootstrapped 100%" tor may not have an exit circuit for this port yet,
@@ -161,29 +217,39 @@ def run_checks(probe, settings: Settings, sleep=time.sleep) -> list[CheckResult]
             ipaddress.ip_address(ip)
         results.append(CheckResult("tor", "Traffic exits through Tor", PASS if ok else FAIL,
                                    f"exit IP: {ip}" if ok else "check.torproject.org did not confirm Tor"))
+    except Exception as exc:  # noqa: BLE001 - check site unreachable: not proof of a leak, not proof of Tor
+        results.append(CheckResult("tor", "Traffic exits through Tor", INCONCLUSIVE, str(exc)))
+
+    try:
+        phys = probe.physical_ipv4()
     except Exception as exc:  # noqa: BLE001
-        results.append(CheckResult("tor", "Traffic exits through Tor", FAIL, str(exc)))
-
-    phys = probe.physical_ipv4()
-    if not phys:
-        results.append(CheckResult("bypass", "Direct exit attempt from the physical NIC", WARN,
-                                   "no physical network interface found to test"))
+        phys, phys_err = None, str(exc)
     else:
-        leaked = probe.tcp_connect(phys, "1.1.1.1", 443)
-        results.append(CheckResult("bypass", "Direct TCP exit attempt (physical NIC)",
-                                   FAIL if leaked else PASS,
-                                   "direct connection succeeded: LEAK!" if leaked else "blocked"))
-        leaked_udp = probe.udp_dns_probe(phys, "1.1.1.1")
-        results.append(CheckResult("udp", "Direct UDP exit attempt",
-                                   FAIL if leaked_udp else PASS,
-                                   "a direct UDP reply arrived: LEAK!" if leaked_udp else "blocked"))
+        phys_err = "no physical network interface found to test"
+    if not phys:
+        results.append(CheckResult("bypass", "Direct exit attempt from the physical NIC", INCONCLUSIVE, phys_err))
+    else:
+        results.append(_probe_result("bypass", "Direct TCP exit attempt (physical NIC)",
+                                     as_outcome(probe.tcp_connect(phys, "1.1.1.1", 443))))
+        results.append(_probe_result("udp", "Direct UDP exit attempt",
+                                     as_outcome(probe.udp_dns_probe(phys, "1.1.1.1"))))
 
-    leaked6 = probe.tcp_connect(None, "2606:4700:4700::1111", 443, socket.AF_INET6)
-    results.append(CheckResult("ipv6", "IPv6 exit attempt", FAIL if leaked6 else PASS,
-                               "IPv6 connection succeeded: possible LEAK!" if leaked6 else "blocked"))
+    results.append(_probe_result("ipv6", "IPv6 exit attempt",
+                                 as_outcome(probe.tcp_connect(None, "2606:4700:4700::1111", 443, socket.AF_INET6))))
     return results
 
 
+def _probe_result(key: str, title: str, o: Outcome) -> CheckResult:
+    status = {BLOCKED: PASS, LEAKED: FAIL, TEST_ERROR: INCONCLUSIVE}[o.state]
+    prefix = {BLOCKED: "blocked", LEAKED: "LEAK", TEST_ERROR: "test could not run"}[o.state]
+    return CheckResult(key, title, status, f"{prefix}: {o.detail}" if o.detail and o.detail != prefix else prefix)
+
+
 def verdict(results: list[CheckResult]) -> str:
+    """FAIL > INCONCLUSIVE > WARN > PASS. WARN is reserved for exceptions the user accepted
+    (split tunnel, service rules); anything that could not be verified is INCONCLUSIVE (F05)."""
     statuses = {r.status for r in results}
-    return FAIL if FAIL in statuses else WARN if WARN in statuses else PASS
+    for s in (FAIL, INCONCLUSIVE, WARN):
+        if s in statuses:
+            return s
+    return PASS

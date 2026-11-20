@@ -17,6 +17,7 @@ are gone and the machine is back to normal networking.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -70,6 +71,17 @@ class PosixOps:
                 return os.readlink(f"/proc/{pid}/exe")
             except OSError:
                 return None
+        # macOS: ask the kernel for the executable path (proc_pidpath); `ps -o comm` output is
+        # not a reliable full path.
+        try:
+            import ctypes
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buf = ctypes.create_string_buffer(4096)
+            n = libproc.proc_pidpath(ctypes.c_int(int(pid)), buf, ctypes.c_uint32(4096))
+            if n > 0:
+                return buf.value.decode("utf-8", "replace")
+        except (OSError, AttributeError):
+            pass
         out = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True).stdout.strip()
         return out or None
 
@@ -196,10 +208,59 @@ table inet {NFT_TABLE} {{
 """
 
 
-def nft_enforcing(listing: str, tun_name: str, gid: int = PHANTOMX_GID) -> bool:
-    """Independent check of what the kernel actually holds (`nft list table`)."""
-    return (listing.count("policy drop") >= 2 and "hook output" in listing and "hook forward" in listing
-            and f"skgid {gid}" in listing and f'"{tun_name}"' in listing)
+def _match_key(expr: dict) -> tuple | None:
+    """('oifname', 'lo'), ('skgid', 64927), ('udp.sport', 68)... from one nft JSON match."""
+    m = expr.get("match")
+    if not isinstance(m, dict) or m.get("op", "==") not in ("==", "in"):
+        return None
+    left, right = m.get("left") or {}, m.get("right")
+    if "meta" in left:
+        return (left["meta"].get("key"), right)
+    if "payload" in left:
+        p = left["payload"]
+        return (f"{p.get('protocol')}.{p.get('field')}", right)
+    return ("?", right)
+
+
+def nft_enforcing(doc, tun_name: str, gid: int = PHANTOMX_GID) -> bool:
+    """F04: STRUCTURAL check of `nft -j list table inet phantomx` (no text matching).
+
+    Requires: the base chains hooked on output AND forward have policy drop, and every rule
+    that accepts is exactly one of our expected allowances (no unconditional accept, no
+    jump/goto that could lead elsewhere)."""
+    if isinstance(doc, str):
+        try:
+            doc = json.loads(doc)
+        except ValueError:
+            return False
+    items = (doc or {}).get("nftables") if isinstance(doc, dict) else None
+    if not isinstance(items, list):
+        return False
+    chains = [i["chain"] for i in items if isinstance(i, dict) and "chain" in i]
+    rules = [i["rule"] for i in items if isinstance(i, dict) and "rule" in i]
+
+    def hooked_drop(hook: str) -> bool:
+        base = [c for c in chains if c.get("hook") == hook and c.get("type") == "filter"]
+        return bool(base) and all(c.get("policy") == "drop" for c in base)
+
+    if not (hooked_drop("output") and hooked_drop("forward")):
+        return False
+    allowed = {
+        frozenset({("oifname", "lo")}),
+        frozenset({("skgid", gid)}),
+        frozenset({("oifname", tun_name)}),
+        frozenset({("iifname", tun_name)}),
+        frozenset({("udp.sport", 68), ("udp.dport", 67)}),
+    }
+    for rule in rules:
+        exprs = rule.get("expr") or []
+        if any(isinstance(e, dict) and ("jump" in e or "goto" in e) for e in exprs):
+            return False
+        if any(isinstance(e, dict) and "accept" in e for e in exprs):
+            matches = frozenset(k for k in (_match_key(e) for e in exprs if isinstance(e, dict)) if k)
+            if matches not in allowed:
+                return False
+    return True
 
 
 class LinuxFirewall:
@@ -210,7 +271,8 @@ class LinuxFirewall:
         return {"profiles": [], "rules": []}
 
     def _listing(self) -> str | None:
-        proc = subprocess.run(["nft", "list", "table", "inet", NFT_TABLE], capture_output=True, text=True)
+        """The kernel's view of our table as JSON (`nft -j`), or None if the table is absent."""
+        proc = subprocess.run(["nft", "-j", "list", "table", "inet", NFT_TABLE], capture_output=True, text=True)
         return proc.stdout if proc.returncode == 0 else None
 
     def lockdown(self, disable_rules, allow_programs) -> None:

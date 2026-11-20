@@ -56,13 +56,35 @@ Emit ([pscustomobject]@{ ok = $true })
 """
 
 PS_RESTORE = r"""
+$errs = @()
 foreach ($p in @($D.profiles)) {
-  Set-NetFirewallProfile -PolicyStore PersistentStore -Name ([string]$p.name) -DefaultOutboundAction ([string]$p.outbound)
+  try { Set-NetFirewallProfile -PolicyStore PersistentStore -Name ([string]$p.name) -DefaultOutboundAction ([string]$p.outbound) -ErrorAction Stop }
+  catch { $errs += ('profile ' + [string]$p.name + ': ' + $_.Exception.Message) }
 }
-$names = @($D.rules | ForEach-Object { [string]$_ })
-if ($names.Count -gt 0) { Enable-NetFirewallRule -PolicyStore PersistentStore -Name $names -ErrorAction SilentlyContinue }
+$wanted = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($n in @($D.rules)) { [void]$wanted.Add([string]$n) }
+$found = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction SilentlyContinue | Where-Object { $wanted.Contains([string]$_.Name) })
+foreach ($r in $found) {
+  if ([string]$r.Enabled -ne 'True') {
+    try { $r | Set-NetFirewallRule -Enabled True -ErrorAction Stop }
+    catch { $errs += ([string]$r.Name + ': ' + $_.Exception.Message) }
+  }
+}
 Remove-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$D.group) -ErrorAction SilentlyContinue
-Emit ([pscustomobject]@{ ok = $true })
+
+# ---- verify against the snapshot (F03) ----
+$profiles_bad = @()
+$now = @{}
+Get-NetFirewallProfile -PolicyStore PersistentStore | ForEach-Object { $now[[string]$_.Name] = [string]$_.DefaultOutboundAction }
+foreach ($p in @($D.profiles)) {
+  if ($now[[string]$p.name] -ne [string]$p.outbound) { $profiles_bad += ([string]$p.name + '=' + $now[[string]$p.name]) }
+}
+$present = @(Get-NetFirewallRule -PolicyStore PersistentStore -ErrorAction SilentlyContinue | Where-Object { $wanted.Contains([string]$_.Name) })
+$not_enabled = @($present | Where-Object { [string]$_.Enabled -ne 'True' } | ForEach-Object { [string]$_.Name })
+$missing = $wanted.Count - $present.Count
+$ours = @(Get-NetFirewallRule -PolicyStore PersistentStore -Group ([string]$D.group) -ErrorAction SilentlyContinue).Count
+Emit ([pscustomobject]@{ profiles_bad = $profiles_bad; not_enabled = $not_enabled; missing = $missing;
+                         ours = $ours; errors = @($errs | Select-Object -First 5) })
 """
 
 PS_STATUS = r"""
@@ -109,8 +131,20 @@ class Firewall:
         if not snapshot or not snapshot.get("profiles"):
             # Emergency path (snapshot lost): return to Windows defaults and drop our rules.
             snapshot = {"profiles": DEFAULT_PROFILES, "rules": (snapshot or {}).get("rules", [])}
-        self.runner.run(PS_RESTORE, {"profiles": snapshot["profiles"], "rules": snapshot.get("rules", []),
-                                     "group": self.group})
+        r = self.runner.run(PS_RESTORE, {"profiles": snapshot["profiles"], "rules": snapshot.get("rules", []),
+                                         "group": self.group}) or {}
+        problems = []
+        if r.get("profiles_bad"):
+            problems.append("profile outbound policy not restored: " + ", ".join(r["profiles_bad"]))
+        if r.get("not_enabled"):
+            problems.append(f"{len(r['not_enabled'])} rule(s) still disabled, e.g. " + ", ".join(r["not_enabled"][:3]))
+        if int(r.get("ours") or 0):
+            problems.append(f"{r['ours']} {self.group} rule(s) still present")
+        if problems:
+            errs = "; ".join(r.get("errors") or [])
+            raise FirewallError("restore could not be verified against the saved snapshot: " + "; ".join(problems)
+                                + (f". Details: {errs}" if errs else ""))
+        # Rules deleted since the snapshot (r["missing"]) cannot be re-enabled; that is not a failure.
 
     def status(self) -> dict:
         """`unmanaged`: names of allow rules we cannot disable; `unmanaged_gpo`: the subset that

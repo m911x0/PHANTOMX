@@ -12,14 +12,15 @@ from pathlib import Path
 from .branding import print_logo
 from .config import normalize_app_path, save_settings
 from .engine import Engine
-from .leakcheck import FAIL, PASS, WARN, verdict
+from .leakcheck import FAIL, INCONCLUSIVE, PASS, WARN, verdict
 from .osinfo import WINDOWS, current_os
 from .paths import Layout
 from .system import is_admin, make_ops, relaunch_elevated
 
 CRASH_LOG = Path(tempfile.gettempdir()) / "phantomx-gui-error.log"
-_SYM = {PASS: "OK  ", WARN: "WARN", FAIL: "FAIL"}
-_VERDICT = {PASS: "RESULT: PROTECTED", WARN: "RESULT: PROTECTED, with warnings",
+_SYM = {PASS: "OK  ", WARN: "NOTE", INCONCLUSIVE: "????", FAIL: "FAIL"}
+_VERDICT = {PASS: "RESULT: PROTECTED", WARN: "RESULT: PROTECTED, with your accepted exceptions",
+            INCONCLUSIVE: "RESULT: NOT VERIFIED - a mandatory check could not run; do not rely on this session",
             FAIL: "RESULT: FAILED - do not browse"}
 
 
@@ -28,7 +29,7 @@ def _print_checks(results) -> int:
         print(f"[{_SYM[r.status]}] {r.title}" + (f" - {r.detail}" if r.detail else ""))
     v = verdict(results)
     print(_VERDICT[v])
-    return 0 if v != FAIL else 3
+    return {PASS: 0, WARN: 0, INCONCLUSIVE: 4, FAIL: 3}[v]
 
 
 def _fix_streams() -> None:
@@ -153,7 +154,9 @@ def _main(argv: list[str] | None) -> int:
             print(f"phase={st.phase or 'off'} firewall_locked={st.firewall_locked} "
                   f"sing-box={st.singbox_alive} tor={st.tor_alive} bootstrap={st.bootstrap}% "
                   f"last_leak_test={st.verified or 'none'}")
-            if st.phase == "running" and st.verified not in ("pass", "warn"):
+            if st.phase == "unsafe":
+                print("UNSAFE: the firewall lock is NOT in place; your connection may be exposed. Run `phantomx stop`.")
+            elif st.phase == "running" and st.verified not in ("pass", "warn"):
                 print("NOT VERIFIED: run `phantomx check` before trusting this session.")
             for n in st.notes:
                 print(n)

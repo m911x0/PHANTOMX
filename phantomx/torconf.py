@@ -10,9 +10,9 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .config import Settings
-from .osinfo import LINUX
+from .osinfo import LINUX, MACOS
 from .paths import Layout
-from .winutil import spawn_detached, tail_files
+from .winutil import child_state, describe_exit, spawn_detached, tail_files
 
 LYREBIRD_TRANSPORTS = ("meek_lite", "obfs2", "obfs3", "obfs4", "scramblesuit", "webtunnel")
 SNOWFLAKE_TRANSPORTS = ("snowflake",)
@@ -173,17 +173,30 @@ class TorService:
         self.layout.tor_log.write_text("", encoding="utf-8")
 
     def start(self) -> int:
-        return self.spawn(
+        self.last_pid = self.spawn(
             [self.layout.tor_exe, "--defaults-torrc", self.layout.torrc_defaults, "-f", self.layout.torrc],
             cwd=self.layout.tor_dir, output=self.layout.tor_console, env=self._env(),
         )
+        return self.last_pid
 
     def _env(self) -> dict | None:
-        if self.layout.os != LINUX:
-            return None
-        env = dict(os.environ)  # the Linux bundle ships its own libssl/libevent next to tor
-        env["LD_LIBRARY_PATH"] = str(self.layout.tor_dir)
-        return env
+        """The bundles ship their own libraries (libevent, and libssl on Linux) next to tor."""
+        if self.layout.os == LINUX:
+            env = dict(os.environ)
+            env["LD_LIBRARY_PATH"] = str(self.layout.tor_dir)
+            return env
+        if self.layout.os == MACOS:
+            env = dict(os.environ)
+            env["DYLD_LIBRARY_PATH"] = str(self.layout.tor_dir)
+            return env
+        return None
+
+    def exit_info(self) -> str:
+        pid = getattr(self, "last_pid", None)
+        if pid is None:
+            return ""
+        tracked, alive, code = child_state(pid)
+        return f" ({describe_exit(code)})" if tracked and not alive else ""
 
     def read_progress(self) -> tuple[int, str | None]:
         try:
@@ -212,7 +225,8 @@ class TorService:
                 raise TorError(f"tor error: {err}")
             polls += 1
             if polls % 4 == 0 and not is_alive():
-                raise TorError("tor exited unexpectedly:\n" + self.log_tail())
+                sleep(0.5)  # let a dying process flush whatever it printed
+                raise TorError(f"tor exited unexpectedly{self.exit_info()}:\n" + self.log_tail())
             if clock() >= deadline:
                 raise TorError(f"tor did not finish connecting within {int(timeout)}s (stuck at {pct}%). "
                                "If Tor is blocked in your country, enable bridges.")

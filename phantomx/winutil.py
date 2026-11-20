@@ -111,7 +111,35 @@ def spawn_detached(args: list[str], cwd: str | Path, output: str | Path | None =
     finally:
         if output:
             sink.close()
+    _CHILDREN[proc.pid] = proc
     return proc.pid
+
+
+# Processes started by THIS process: their liveness/exit code is known exactly (Popen.poll),
+# with no guessing from process listings, which differ per OS (e.g. `ps` output on macOS).
+_CHILDREN: dict[int, subprocess.Popen] = {}
+
+
+def child_state(pid: int) -> tuple[bool, bool, int | None]:
+    """(tracked, alive, exit_code) for a pid we spawned; tracked=False if it isn't ours."""
+    proc = _CHILDREN.get(int(pid))
+    if proc is None:
+        return False, False, None
+    code = proc.poll()
+    return True, code is None, code
+
+
+def describe_exit(code: int | None) -> str:
+    if code is None:
+        return "exit code unknown"
+    if code < 0:
+        sig = -code
+        hint = (" - on macOS this usually means the system blocked the binary (code signing / Gatekeeper)"
+                if sig == 9 and sys.platform == "darwin" else "")
+        return f"killed by signal {sig}{hint}"
+    if os.name == "nt" and code >= 0xC0000000:
+        return f"crashed with Windows status 0x{code:08X}"
+    return f"exit code {code}"
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
