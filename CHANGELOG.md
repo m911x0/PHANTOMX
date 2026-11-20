@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4 (2026-11-20): macOS fix
+- **macOS: tor was killed at launch ("signal 9").** Apple Silicon kills unsigned code silently, and the Tor Expert Bundle's binaries are not signed for direct use. After verifying the archive (Tor's GPG-signed SHA-256 list), the installer now removes quarantine flags and applies an ad-hoc signature to every Mach-O file without a valid one. The manifest pins the result.
+- Start refuses with a clear fix ("press Update components") if the binaries were installed by an older version and macOS would kill them.
+- CI: new **real macOS** job that downloads the verified bundle and actually executes `tor --version`.
+
 ## 0.4.3 (2026-11-20)
 - New `phantomx version` (installed vs. latest on GitHub) and `phantomx update`. Both run as the normal user with no elevation, because pipx lives in the user's profile. On Windows the update runs in its own window after PhantomX exits, since Windows locks running files.
 - Control panel: **Check for updates** link (on demand only).

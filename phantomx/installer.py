@@ -21,6 +21,43 @@ from .paths import Layout
 
 Log = Callable[[str], None]
 
+_MACHO_MAGIC = {bytes.fromhex(h) for h in ("feedfacf", "cffaedfe", "feedface", "cefaedfe", "cafebabe", "bebafeca")}
+
+
+def is_macho(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) in _MACHO_MAGIC
+    except OSError:
+        return False
+
+
+def macos_signature_ok(path: Path, run=subprocess.run) -> bool:
+    return run(["codesign", "--verify", "--strict", str(path)], capture_output=True).returncode == 0
+
+
+def prepare_macos_binaries(root: Path, log: Log = print, run=subprocess.run) -> list[str]:
+    """macOS (Apple Silicon) SIGKILLs any executable code without a valid signature, silently.
+    The Tor Expert Bundle's binaries are not signed for direct use (Tor Browser signs its own
+    copies), so tor is killed at exec ("signal 9"). After OUR verification of the archive
+    (Tor's GPG-signed SHA-256 list), each unsigned Mach-O file gets an ad-hoc signature, which
+    is what the kernel requires; quarantine flags are removed. Returns the files signed."""
+    run(["xattr", "-r", "-d", "com.apple.quarantine", str(root)], capture_output=True)
+    signed = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or p.is_symlink() or not is_macho(p):
+            continue
+        if macos_signature_ok(p, run):
+            continue
+        r = run(["codesign", "--force", "--sign", "-", str(p)], capture_output=True, text=True)
+        if r.returncode != 0 or not macos_signature_ok(p, run):
+            raise IntegrityError(f"macOS: could not sign {p.name}: {(r.stderr or '').strip()}")
+        signed.append(p.name)
+    if signed:
+        log("macOS: applied an ad-hoc signature to " + ", ".join(signed)
+            + " (verified by hash first; macOS kills unsigned code).")
+    return signed
+
 
 # ---------------------------------------------------------------- engine
 def _install_archives(layout: Layout, ops, tor_archive: Path, singbox_archive: Path, log: Log) -> None:
@@ -43,6 +80,8 @@ def _install_archives(layout: Layout, ops, tor_archive: Path, singbox_archive: P
             raise IntegrityError("expected exactly one sing-box binary in the sing-box archive")
         shutil.copytree(found[0].parent, staging / "bin" / "sing-box")
 
+        if layout.os == MACOS:
+            prepare_macos_binaries(staging / "bin", log)  # before hashing: the manifest pins the result
         if layout.os != WINDOWS:
             for p in (staging / "bin").rglob("*"):
                 if p.is_file():

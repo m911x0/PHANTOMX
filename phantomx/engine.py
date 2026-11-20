@@ -87,6 +87,14 @@ class Engine:
         problems = verify_manifest(self.layout.bin, manifest)
         if problems:
             raise StartError("Integrity check failed (files may have been modified):\n" + "\n".join(problems[:10]))
+        if self.layout.os == "macos":
+            from .installer import macos_signature_ok
+            bad = [p.name for p in (self.layout.tor_exe, self.layout.singbox_exe)
+                   if p.exists() and not macos_signature_ok(p)]
+            if bad:
+                raise StartError(f"macOS would kill {', '.join(bad)}: it has no valid code signature "
+                                 "(installed by an older PhantomX). Press 'Update components' "
+                                 "(or run `sudo phantomx setup`) once to fix it.")
         if not firewall_enabled(self.fw.status()):
             raise StartError("Windows Defender Firewall is disabled on at least one profile (or another security "
                              "product manages it). Leak protection cannot be guaranteed without it.")
