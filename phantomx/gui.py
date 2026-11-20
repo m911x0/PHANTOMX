@@ -116,6 +116,9 @@ class App:
         self.engine = Engine(log=lambda m: self.q.put(("log", m)))
         self.busy = False
         self.shown = ""
+        self.pending_check = False
+        self.checks_done = 0
+        self.last_verify = 0.0
         root.title(f"{APP}  -  by {AUTHOR}")
         root.minsize(820, 560)
         root.configure(bg=BG)
@@ -182,7 +185,7 @@ class App:
         grid.pack(fill="x")
         grid.columnconfigure((0, 1, 2), weight=1, uniform="b")
         specs = [
-            ("Leak test", lambda: self._run("check", self.engine.run_checks)),
+            ("Leak test", self._verify),
             ("New identity", lambda: self._run("newnym", self.engine.new_identity)),
             ("Settings", self._settings_dialog),
             ("Open Tor Browser", self._open_tb),
@@ -340,6 +343,18 @@ class App:
             self._install_flow()
         return self.engine.start(self._progress)
 
+    def _verify(self):
+        """Run the leak test with live progress. If something else is running, the request is
+        queued (never silently dropped), so VERIFYING cannot get stuck."""
+        if self.busy:
+            self.pending_check = True
+            return
+        self.pending_check = False
+        self.checks_done = 0
+        self.last_verify = time.monotonic()
+        self.detail_lbl.configure(text="Verifying: starting leak tests...")
+        self._run("check", lambda: self.engine.run_checks(on_result=lambda r: self.q.put(("chk", r))))
+
     def _run(self, name, fn, *args):
         if self.busy:
             return
@@ -377,12 +392,18 @@ class App:
                     elif st.phase == "running" and st.verified is None and self.shown in ("protected", "protected_warn"):
                         self._log("Last leak test is too old; re-verifying...")
                         self._show_status("unverified")
-                        self._run("check", self.engine.run_checks)
+                        self._verify()
+                    elif (st.phase == "running" and self.shown == "unverified" and not self.busy
+                          and time.monotonic() - self.last_verify > 45):
+                        self._verify()  # still unverified (e.g. the previous attempt was skipped): retry
                     elif st.phase != "running" and self.shown in watched:
                         self._show_engine_status(st)
                         self._log("WARNING: a tunnel component stopped "
                                   f"(sing-box alive={st.singbox_alive}, tor alive={st.tor_alive}). "
                                   f"The device is locked (no leak). Last log lines:\n{tail}")
+                elif msg[0] == "chk":
+                    self.checks_done += 1
+                    self.detail_lbl.configure(text=f"Verifying: {self.checks_done} checks done (latest: {msg[1].title})")
                 elif msg[0] == "dl":
                     self.progress["value"] = msg[2]
                     self.detail_lbl.configure(text=f"Downloading {msg[1]}: {msg[2]}%")
@@ -390,6 +411,8 @@ class App:
                     self.busy = False
                     self._set_buttons(True)
                     self._done(*msg[1:])
+                    if self.pending_check and not self.busy:
+                        self._verify()
         except queue.Empty:
             pass
         self.root.after(100, self._poll)
@@ -399,6 +422,8 @@ class App:
             self._log(f"ERROR: {err}")
             if name == "start":
                 self._run("status", self.engine.status)
+            elif name == "check":
+                self._show_status("inconclusive")  # a failed test run is never left as VERIFYING
             messagebox.showerror(APP, str(err))
             return
         if name == "status":
@@ -424,7 +449,7 @@ class App:
             key = VERDICT_KEY.get(st.verified or "", "unverified")
             self._show_status(key)
             if key == "unverified":
-                self.root.after(200, lambda: self._run("check", self.engine.run_checks))
+                self.root.after(200, self._verify)
         elif st.phase == "unsafe":
             self._show_status("unsafe")
         elif st.phase in ("locked", "locking"):

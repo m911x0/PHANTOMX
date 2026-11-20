@@ -302,9 +302,15 @@ class Engine:
         self.state.clear()
         self.log("Protection stopped; original firewall settings restored and verified.")
 
-    def run_checks(self, settings: Settings | None = None) -> list[CheckResult]:
+    def run_checks(self, settings: Settings | None = None, on_result=None) -> list[CheckResult]:
         settings = settings or self.settings()
-        results = run_checks(self.probe_factory(settings), settings)
+        self.log("Running leak tests...")
+
+        def report(r: CheckResult) -> None:
+            self.log(f"  {r.status.upper():<12} {r.title}")
+            if on_result:
+                on_result(r)
+        results = run_checks(self.probe_factory(settings), settings, on_result=report)
         state = self.state.load()
         if state and state.get("phase") == "running":  # PX07: remember the verification
             state["last_check"] = {"verdict": verdict(results), "at": time.time()}

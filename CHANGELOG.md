@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5 (2026-11-20): faster, never-stuck verification
+- Leak tests now run **in parallel**: total time is the slowest single check, not the sum. The Tor check uses a 15 s timeout with up to 4 attempts.
+- Live progress while VERIFYING ("n checks done, latest: ...") and each result in the activity log.
+- The GUI can no longer stay stuck in VERIFYING: a check requested while another task runs is queued (never dropped), a failed test run shows NOT VERIFIED, and an unverified session is retried automatically.
+- A check that crashes is reported as INCONCLUSIVE, never as a pass.
+
 ## 0.4.4 (2026-11-20): macOS fix
 - **macOS: tor was killed at launch ("signal 9").** Apple Silicon kills unsigned code silently, and the Tor Expert Bundle's binaries are not signed for direct use. After verifying the archive (Tor's GPG-signed SHA-256 list), the installer now removes quarantine flags and applies an ad-hoc signature to every Mach-O file without a valid one. The manifest pins the result.
 - Start refuses with a clear fix ("press Update components") if the binaries were installed by an older version and macOS would kill them.

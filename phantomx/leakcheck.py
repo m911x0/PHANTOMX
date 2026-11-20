@@ -14,6 +14,7 @@ import struct
 import time
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .config import Settings
@@ -52,7 +53,7 @@ class SystemProbe:
 
     def tor_check(self) -> dict:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # system route only
-        with opener.open(CHECK_URL, timeout=30) as resp:
+        with opener.open(CHECK_URL, timeout=TOR_CHECK_TIMEOUT) as resp:
             if resp.status != 200:
                 raise ValueError(f"HTTP {resp.status}")
             return json.loads(resp.read(4096).decode("utf-8"))
@@ -157,49 +158,54 @@ def as_outcome(value) -> Outcome:
 
 
 TOR_CHECK_ATTEMPTS = 4
-TOR_CHECK_RETRY_DELAY = 5
+TOR_CHECK_RETRY_DELAY = 3
+TOR_CHECK_TIMEOUT = 15
 
 
-def run_checks(probe, settings: Settings, sleep=time.sleep) -> list[CheckResult]:
-    results: list[CheckResult] = []
-
+def _check_firewall(probe) -> list[CheckResult]:
     try:
         fw = probe.firewall_status()
-        locked = firewall_locked(fw)
-        results.append(CheckResult("firewall", "Firewall lock (no direct outbound)",
-                                   PASS if locked else FAIL,
-                                   "" if locked else "the firewall does not report the lock as enforced"))
-        gpo = list(fw.get("unmanaged_gpo") or [])
-        extra = [n for n in fw.get("unmanaged") or [] if n not in gpo]
-        if gpo:
-            # PX03: a policy-managed allow rule can override the local lock, so protection
-            # cannot be claimed on such a machine.
-            results.append(CheckResult(
-                "rules", "Outbound allow rules enforced by Group Policy", FAIL,
-                f"{len(gpo)} policy rule(s) PhantomX cannot disable may allow direct traffic: " + ", ".join(gpo[:5])))
-        else:
-            results.append(CheckResult(
-                "rules", "Unmanaged outbound allow rules", WARN if extra else PASS,
-                (f"{len(extra)} system/service rule(s) PhantomX cannot disable; they only matter if the tunnel "
-                 "stops: " + ", ".join(extra[:5])) if extra else ""))
     except Exception as exc:  # noqa: BLE001 - report, never crash the check run
-        results.append(CheckResult("firewall", "Firewall lock (no direct outbound)", FAIL, str(exc)))
+        return [CheckResult("firewall", "Firewall lock (no direct outbound)", FAIL, str(exc))]
+    locked = firewall_locked(fw)
+    out = [CheckResult("firewall", "Firewall lock (no direct outbound)", PASS if locked else FAIL,
+                       "" if locked else "the firewall does not report the lock as enforced")]
+    gpo = list(fw.get("unmanaged_gpo") or [])
+    extra = [n for n in fw.get("unmanaged") or [] if n not in gpo]
+    if gpo:
+        # PX03: a policy-managed allow rule can override the local lock, so protection
+        # cannot be claimed on such a machine.
+        out.append(CheckResult(
+            "rules", "Outbound allow rules enforced by Group Policy", FAIL,
+            f"{len(gpo)} policy rule(s) PhantomX cannot disable may allow direct traffic: " + ", ".join(gpo[:5])))
+    else:
+        out.append(CheckResult(
+            "rules", "Unmanaged outbound allow rules", WARN if extra else PASS,
+            (f"{len(extra)} system/service rule(s) PhantomX cannot disable; they only matter if the tunnel "
+             "stops: " + ", ".join(extra[:5])) if extra else ""))
+    return out
 
+
+def _check_split(settings) -> list[CheckResult]:
     apps = settings.bypass_apps
-    results.append(CheckResult(
+    return [CheckResult(
         "split", "Apps bypassing Tor (split tunnel)", WARN if apps else PASS,
         ("these use your REAL IP by your choice: " + ", ".join(a.replace("/", "\\").rsplit("\\", 1)[-1] for a in apps))
-        if apps else "none"))
+        if apps else "none")]
 
+
+def _check_dns(probe, settings) -> list[CheckResult]:
     fake = ipaddress.ip_network(settings.fakeip_range)
     try:
         ips = probe.resolve_ipv4(f"{uuid.uuid4().hex[:16]}.example.com")
-        ok = bool(ips) and all(ipaddress.ip_address(ip) in fake for ip in ips)
-        results.append(CheckResult("dns", "DNS stays inside the tunnel", PASS if ok else FAIL,
-                                   "" if ok else f"resolved to real addresses: {', '.join(ips)}"))
     except OSError as exc:
-        results.append(CheckResult("dns", "DNS stays inside the tunnel", INCONCLUSIVE, f"lookup failed: {exc}"))
+        return [CheckResult("dns", "DNS stays inside the tunnel", INCONCLUSIVE, f"lookup failed: {exc}")]
+    ok = bool(ips) and all(ipaddress.ip_address(ip) in fake for ip in ips)
+    return [CheckResult("dns", "DNS stays inside the tunnel", PASS if ok else FAIL,
+                        "" if ok else f"resolved to real addresses: {', '.join(ips)}")]
 
+
+def _check_tor(probe, sleep) -> list[CheckResult]:
     try:
         # Right after "Bootstrapped 100%" tor may not have an exit circuit for this port yet,
         # so the first stream can be closed (seen as SSL EOF). Retry before reporting.
@@ -215,11 +221,13 @@ def run_checks(probe, settings: Settings, sleep=time.sleep) -> list[CheckResult]
         ok = isinstance(body, dict) and body.get("IsTor") is True and isinstance(ip, str)
         if ok:
             ipaddress.ip_address(ip)
-        results.append(CheckResult("tor", "Traffic exits through Tor", PASS if ok else FAIL,
-                                   f"exit IP: {ip}" if ok else "check.torproject.org did not confirm Tor"))
+        return [CheckResult("tor", "Traffic exits through Tor", PASS if ok else FAIL,
+                            f"exit IP: {ip}" if ok else "check.torproject.org did not confirm Tor")]
     except Exception as exc:  # noqa: BLE001 - check site unreachable: not proof of a leak, not proof of Tor
-        results.append(CheckResult("tor", "Traffic exits through Tor", INCONCLUSIVE, str(exc)))
+        return [CheckResult("tor", "Traffic exits through Tor", INCONCLUSIVE, str(exc))]
 
+
+def _check_bypass(probe) -> list[CheckResult]:
     try:
         phys = probe.physical_ipv4()
     except Exception as exc:  # noqa: BLE001
@@ -227,16 +235,46 @@ def run_checks(probe, settings: Settings, sleep=time.sleep) -> list[CheckResult]
     else:
         phys_err = "no physical network interface found to test"
     if not phys:
-        results.append(CheckResult("bypass", "Direct exit attempt from the physical NIC", INCONCLUSIVE, phys_err))
-    else:
-        results.append(_probe_result("bypass", "Direct TCP exit attempt (physical NIC)",
-                                     as_outcome(probe.tcp_connect(phys, "1.1.1.1", 443))))
-        results.append(_probe_result("udp", "Direct UDP exit attempt",
-                                     as_outcome(probe.udp_dns_probe(phys, "1.1.1.1"))))
+        return [CheckResult("bypass", "Direct exit attempt from the physical NIC", INCONCLUSIVE, phys_err)]
+    return [_probe_result("bypass", "Direct TCP exit attempt (physical NIC)",
+                          as_outcome(probe.tcp_connect(phys, "1.1.1.1", 443))),
+            _probe_result("udp", "Direct UDP exit attempt", as_outcome(probe.udp_dns_probe(phys, "1.1.1.1")))]
 
-    results.append(_probe_result("ipv6", "IPv6 exit attempt",
-                                 as_outcome(probe.tcp_connect(None, "2606:4700:4700::1111", 443, socket.AF_INET6))))
-    return results
+
+def _check_ipv6(probe) -> list[CheckResult]:
+    return [_probe_result("ipv6", "IPv6 exit attempt",
+                          as_outcome(probe.tcp_connect(None, "2606:4700:4700::1111", 443, socket.AF_INET6)))]
+
+
+def run_checks(probe, settings: Settings, sleep=time.sleep, on_result=None) -> list[CheckResult]:
+    """All checks, the slow network ones IN PARALLEL: total time is the slowest single check
+    (worst case ~1 min for an unreachable check site), not their sum. `on_result(result)` is
+    called as each one finishes so the UI can show live progress. Results keep a fixed order."""
+    tasks = [
+        lambda: _check_firewall(probe),
+        lambda: _check_split(settings),
+        lambda: _check_dns(probe, settings),
+        lambda: _check_tor(probe, sleep),
+        lambda: _check_bypass(probe),
+        lambda: _check_ipv6(probe),
+    ]
+
+    def run(task):
+        try:
+            res = task()
+        except Exception as exc:  # noqa: BLE001 - a crashing check is inconclusive, never a pass
+            res = [CheckResult("internal", "Leak test", INCONCLUSIVE, f"check crashed: {exc}")]
+        if on_result:
+            for r in res:
+                try:
+                    on_result(r)
+                except Exception:  # noqa: BLE001
+                    pass
+        return res
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = [pool.submit(run, t) for t in tasks]
+        return [r for f in futures for r in f.result()]
 
 
 def _probe_result(key: str, title: str, o: Outcome) -> CheckResult:
