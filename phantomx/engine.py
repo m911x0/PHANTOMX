@@ -88,9 +88,9 @@ class Engine:
         if problems:
             raise StartError("Integrity check failed (files may have been modified):\n" + "\n".join(problems[:10]))
         if self.layout.os == "macos":
-            from .installer import macos_signature_ok
+            from .installer import is_macho, macos_signature_ok
             bad = [p.name for p in (self.layout.tor_exe, self.layout.singbox_exe)
-                   if p.exists() and not macos_signature_ok(p)]
+                   if p.exists() and is_macho(p) and not macos_signature_ok(p)]
             if bad:
                 raise StartError(f"macOS would kill {', '.join(bad)}: it has no valid code signature "
                                  "(installed by an older PhantomX). Press 'Update components' "
