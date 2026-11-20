@@ -220,6 +220,8 @@ class App:
                  font=(FONT, 9)).pack(side="left")
         Link(foot, "About & legal", self._about).pack(side="right")
         tk.Label(foot, text="  /  ", bg=BG, fg=FAINT, font=(FONT, 9)).pack(side="right")
+        Link(foot, "Check for updates", self._check_updates).pack(side="right")
+        tk.Label(foot, text="  /  ", bg=BG, fg=FAINT, font=(FONT, 9)).pack(side="right")
         Link(foot, "Star PHANTOMX on GitHub", REPO_URL, fg=TEXT).pack(side="right")
 
     def _set_buttons(self, on: bool):
@@ -253,6 +255,24 @@ class App:
         tk.Label(box, text=DISCLAIMER, bg=CARD, fg=SUB, font=(FONT, 9), justify="left", anchor="nw",
                  wraplength=560).pack(fill="both", expand=True)
         FlatButton(win, "CLOSE", win.destroy, "outline", 10, 8).pack(fill="x", pady=(14, 0))
+
+    def _check_updates(self):
+        """Only on request (it contacts GitHub). Updating itself is done from a normal,
+        non-elevated terminal, because this window runs with Administrator/root rights."""
+        def work():
+            from . import updater
+            try:
+                latest = updater.latest_version()
+                if updater.is_newer(latest):
+                    msg = (f"PhantomX {latest} is available (you have {__version__}).\n\n"
+                           "To update, close PhantomX, open a normal terminal (not as Administrator) and run:\n\n"
+                           "    phantomx update")
+                else:
+                    msg = f"You are up to date ({__version__})."
+            except Exception as exc:  # noqa: BLE001
+                msg = f"Could not check for updates: {exc}"
+            self.root.after(0, lambda: messagebox.showinfo(f"{APP} updates", msg))
+        threading.Thread(target=work, daemon=True).start()
 
     def _first_run_terms(self):
         try:

@@ -76,6 +76,19 @@ phantomx
 ```
 That's it. PHANTOMX asks for Administrator/root rights by itself (a UAC prompt on Windows, `sudo` on macOS/Linux) and opens the control panel. Press **START PROTECTION**. On first use it downloads and verifies its components automatically.
 
+## Update
+Run these from a **normal** terminal (not as Administrator, without `sudo`):
+```
+phantomx version      # installed vs. latest version
+phantomx update       # update to the latest version
+```
+The control panel also has a **Check for updates** link. Nothing is checked automatically: contacting GitHub would reveal that you use PhantomX.
+
+**Upgrading from 0.4.2 or older** (those versions have no `update` command) needs a one-time reinstall:
+```
+pipx install --force https://github.com/m911x0/PHANTOMX/archive/refs/heads/main.zip
+```
+
 ## What happens automatically
 | Component | Source | Verification |
 |---|---|---|

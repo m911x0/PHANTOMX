@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3 (2026-11-20)
+- New `phantomx version` (installed vs. latest on GitHub) and `phantomx update`. Both run as the normal user with no elevation, because pipx lives in the user's profile. On Windows the update runs in its own window after PhantomX exits, since Windows locks running files.
+- Control panel: **Check for updates** link (on demand only).
+- One-time manual reinstall needed when coming from 0.4.2 or older (see README → Update).
+
 ## 0.4.2 (2026-11-20): security correctness (re-audit of 0.4.1)
 - **FINDING-01 (critical):** a failed or unverified lock is never recorded or shown as LOCKED. The new **UNSAFE** state ("lock NOT confirmed, you may be exposed") is used whenever the firewall does not confirm enforcement. `status` re-checks the real firewall every time, whatever the journal says.
 - **FINDING-02:** leak probes have three outcomes: **BLOCKED / LEAKED / TEST_ERROR**. Socket setup failures are TEST_ERROR and are never counted as a pass. A remote answer (connection refused/reset) is treated as a **leak**, because packets left the machine.

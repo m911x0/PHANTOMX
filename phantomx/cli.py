@@ -92,7 +92,39 @@ def _build_parser() -> argparse.ArgumentParser:
     bp_sub.add_parser("add").add_argument("path")
     bp_sub.add_parser("remove").add_argument("path")
     sub.add_parser("gui", help="open the control panel (default)")
+    sub.add_parser("version", help="show the installed version and the latest one on GitHub")
+    sub.add_parser("update", help="update PhantomX to the latest version (run WITHOUT admin/sudo)")
     return p
+
+
+def _version_cmd() -> int:
+    from . import __version__, updater
+    print(f"Installed: {__version__}")
+    try:
+        latest = updater.latest_version()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Latest:    unknown ({exc})")
+        return 1
+    print(f"Latest:    {latest}")
+    if updater.is_newer(latest):
+        print("An update is available. Run:  phantomx update")
+    else:
+        print("You are up to date.")
+    return 0
+
+
+def _update_cmd() -> int:
+    from . import __version__, updater
+    try:
+        latest = updater.latest_version()
+        if not updater.is_newer(latest):
+            print(f"Already up to date ({__version__}).")
+            return 0
+        print(f"Updating {__version__} -> {latest}")
+        return updater.run_update()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 def _main(argv: list[str] | None) -> int:
@@ -101,6 +133,12 @@ def _main(argv: list[str] | None) -> int:
     raw_args = list(argv) if argv is not None else sys.argv[1:]
 
     print_logo()
+
+    # These run as the normal user: no elevation (pipx lives in the user's profile).
+    if cmd == "version":
+        return _version_cmd()
+    if cmd == "update":
+        return _update_cmd()
 
     if not is_admin():
         if cmd == "gui" or current_os() != WINDOWS:
