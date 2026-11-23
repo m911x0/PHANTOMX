@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phantomx"
-version = "0.4.5"
+version = "0.4.6"
 description = "PHANTOMX: route the whole device through Tor with a fail-closed firewall lock and real leak tests (Windows, macOS, Linux)"
 requires-python = ">=3.10"
 dependencies = []

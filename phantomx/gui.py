@@ -124,9 +124,12 @@ class App:
         root.configure(bg=BG)
         self._style_ttk()
         self._build()
-        root.after(100, self._poll)
-        root.after(WATCH_MS, self._watch)
+        self._timers = {}
+        self._timers["poll"] = root.after(100, self._poll)
+        self._timers["watch"] = root.after(WATCH_MS, self._watch)
         root.after(300, self._first_run_terms)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.closing = False
         self._run("status", self.engine.status)
 
     # ---------- layout ----------
@@ -277,6 +280,52 @@ class App:
             self.root.after(0, lambda: messagebox.showinfo(f"{APP} updates", msg))
         threading.Thread(target=work, daemon=True).start()
 
+    def _shutdown(self):
+        """Cancel recurring timers, then close (no stray callbacks on a destroyed window)."""
+        for tid in self._timers.values():
+            try:
+                self.root.after_cancel(tid)
+            except tk.TclError:
+                pass
+        self.root.destroy()
+
+    ACTIVE_STATES = ("starting", "locked", "unverified", "protected", "protected_warn", "inconclusive", "leak", "unsafe")
+
+    def _on_close(self):
+        """Closing the window does not stop protection (that would expose the user if it
+        were closed by mistake), so say so and let the user choose."""
+        if self.shown not in self.ACTIVE_STATES:
+            self._shutdown()
+            return
+        win = self._dialog(f"{APP} - Close", 560, 300)
+        win.grab_set()
+        tk.Label(win, text="Protection is still active", bg=BG, fg=TEXT, font=(FONT, 14, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(win, text=("Closing this window does not stop PhantomX. If it keeps running, all your "
+                            "internet traffic stays routed through Tor, which is slower than a normal "
+                            "connection."),
+                 bg=BG, fg=SUB, font=(FONT, 10), justify="left", anchor="w", wraplength=510).pack(fill="x", pady=(10, 16))
+        row = tk.Frame(win, bg=BG)
+        row.pack(fill="x", side="bottom")
+        row.columnconfigure((0, 1, 2), weight=1, uniform="c")
+
+        def stop_and_close():
+            win.destroy()
+            if self.busy:
+                messagebox.showinfo(APP, "Please wait for the current operation to finish, then close again.")
+                return
+            self.closing = True
+            self._log("Stopping protection before closing...")
+            self._run("stop", self.engine.stop)
+
+        def keep_and_close():
+            win.destroy()
+            self._shutdown()
+
+        FlatButton(row, "STOP & CLOSE", stop_and_close, "primary", 10, 10).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        FlatButton(row, "KEEP RUNNING", keep_and_close, "outline", 10, 10).grid(row=0, column=1, sticky="ew", padx=4)
+        FlatButton(row, "CANCEL", win.destroy, "ghost", 10, 10).grid(row=0, column=2, sticky="ew", padx=(4, 0))
+
     def _first_run_terms(self):
         try:
             if self.engine.settings().terms_accepted:
@@ -318,7 +367,7 @@ class App:
                 except Exception as exc:  # noqa: BLE001
                     self.q.put(("log", f"watchdog: {exc}"))
             threading.Thread(target=work, daemon=True).start()
-        self.root.after(WATCH_MS, self._watch)
+        self._timers["watch"] = self.root.after(WATCH_MS, self._watch)
 
     def _progress(self, pct: int):
         self.q.put(("progress", pct))
@@ -415,7 +464,7 @@ class App:
                         self._verify()
         except queue.Empty:
             pass
-        self.root.after(100, self._poll)
+        self._timers["poll"] = self.root.after(100, self._poll)
 
     def _done(self, name, result, err):
         if err is not None:
@@ -424,6 +473,8 @@ class App:
                 self._run("status", self.engine.status)
             elif name == "check":
                 self._show_status("inconclusive")  # a failed test run is never left as VERIFYING
+            elif name == "stop":
+                self.closing = False  # stop failed: keep the window so the user sees the state
             messagebox.showerror(APP, str(err))
             return
         if name == "status":
@@ -434,6 +485,8 @@ class App:
         elif name == "stop":
             self.progress["value"] = 0
             self._show_status("off")
+            if self.closing:
+                self._shutdown()
         elif name == "install":
             self.progress["value"] = 100
             self.detail_lbl.configure(text="Components installed and verified.")

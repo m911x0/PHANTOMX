@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.6 (2026-11-23)
+- Closing the control panel while protection is active now asks what to do: **Stop & close** (restore normal internet), **Keep running** (protection stays on in the background), or **Cancel**. Previously the window just closed, leaving traffic routed through Tor with no notice, which made the connection seem slow for no reason.
+- Clean GUI shutdown: recurring timers are cancelled before the window closes.
+
 ## 0.4.5 (2026-11-20): faster, never-stuck verification
 - Leak tests now run **in parallel**: total time is the slowest single check, not the sum. The Tor check uses a 15 s timeout with up to 4 attempts.
 - Live progress while VERIFYING ("n checks done, latest: ...") and each result in the activity log.
